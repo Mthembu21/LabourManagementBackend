@@ -2,8 +2,7 @@ const mongoose = require('mongoose');
 
 const jobReportSchema = new mongoose.Schema({
     job_id: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Job',
+        type: String,
         required: true
     },
     job_number: String,

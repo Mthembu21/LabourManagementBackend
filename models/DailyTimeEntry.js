@@ -16,8 +16,7 @@ const dailyTimeEntrySchema = new mongoose.Schema({
     },
     day_of_week: String,
     job_id: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Job',
+        type: String,
         required: true
     },
     job_number: String,

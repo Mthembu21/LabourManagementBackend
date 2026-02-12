@@ -31,6 +31,17 @@ router.get('/technician/:technicianId', requireAuth, async (req, res) => {
 router.post('/', requireAuth, async (req, res) => {
     try {
         const { timeEntry, report } = req.body;
+        const productiveHours = Number(timeEntry?.productive_hours || 0);
+        const technicianId = timeEntry?.technician_id;
+        const technicianName = timeEntry?.technician_name;
+        const jobNumber = timeEntry?.job_id;
+
+        if (!jobNumber) {
+            return res.status(400).json({ error: 'job_id (Job ID) is required' });
+        }
+        if (!technicianId) {
+            return res.status(400).json({ error: 'technician_id is required' });
+        }
         
         const entry = new DailyTimeEntry(timeEntry);
         await entry.save();
@@ -43,7 +54,7 @@ router.post('/', requireAuth, async (req, res) => {
             await jobReport.save();
             
             if (report.has_bottleneck) {
-                const job = await Job.findById(timeEntry.job_id);
+                const job = await Job.findOne({ job_number: jobNumber });
                 if (job) {
                     job.bottleneck_count = (job.bottleneck_count || 0) + 1;
                     await job.save();
@@ -51,12 +62,42 @@ router.post('/', requireAuth, async (req, res) => {
             }
         }
         
-        const job = await Job.findById(timeEntry.job_id);
+        // Update job totals and technician-specific totals by Job ID (job_number)
+        let job = await Job.findOneAndUpdate(
+            { job_number: jobNumber, 'technicians.technician_id': technicianId },
+            {
+                $inc: {
+                    consumed_hours: productiveHours,
+                    'technicians.$.consumed_hours': productiveHours
+                }
+            },
+            { new: true }
+        );
+
+        if (!job) {
+            job = await Job.findOneAndUpdate(
+                { job_number: jobNumber },
+                {
+                    $inc: { consumed_hours: productiveHours },
+                    $push: {
+                        technicians: {
+                            technician_id: technicianId,
+                            technician_name: technicianName || '',
+                            confirmed_by_technician: true,
+                            confirmed_date: new Date(),
+                            consumed_hours: productiveHours
+                        }
+                    }
+                },
+                { new: true }
+            );
+        }
+
         if (job) {
-            const newConsumed = (job.consumed_hours || 0) + timeEntry.productive_hours;
-            const newRemaining = job.allocated_hours - newConsumed;
-            const progress = (newConsumed / job.allocated_hours) * 100;
-            
+            const newConsumed = job.consumed_hours || 0;
+            const newRemaining = (job.allocated_hours || 0) - newConsumed;
+            const progress = job.allocated_hours ? (newConsumed / job.allocated_hours) * 100 : 0;
+
             let status = job.status;
             if (job.status !== 'completed') {
                 if (newConsumed > job.allocated_hours) {
@@ -69,13 +110,16 @@ router.post('/', requireAuth, async (req, res) => {
                     status = 'in_progress';
                 }
             }
-            
-            job.consumed_hours = newConsumed;
-            job.remaining_hours = Math.max(0, newRemaining);
-            job.progress_percentage = Math.min(100, progress);
-            job.status = status;
-            
-            await job.save();
+
+            job = await Job.findByIdAndUpdate(
+                job._id,
+                {
+                    remaining_hours: Math.max(0, newRemaining),
+                    progress_percentage: Math.min(100, progress),
+                    status
+                },
+                { new: true }
+            );
         }
         
         res.status(201).json(entry);
