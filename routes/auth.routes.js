@@ -2,14 +2,27 @@ const express = require('express');
 const router = express.Router();
 const Technician = require('../models/Technician');
 
+function escapeRegex(str) {
+    return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // Technician login
 router.post('/technician/login', async (req, res) => {
     try {
-        const { name, employee_id } = req.body;
-        
+        const rawName = req.body?.name;
+        const rawEmployeeId = req.body?.employee_id;
+
+        const name = typeof rawName === 'string' ? rawName.trim() : '';
+        const employee_id = String(rawEmployeeId ?? '').trim();
+
+        if (!name || !employee_id) {
+            return res.status(400).json({ error: 'name and employee_id are required' });
+        }
+
         const technician = await Technician.findOne({
-            name: new RegExp(`^${name}$`, 'i'),
-            employee_id: employee_id
+            name: new RegExp(`^${escapeRegex(name)}$`, 'i'),
+            employee_id,
+            status: 'active'
         });
 
         if (!technician) {
