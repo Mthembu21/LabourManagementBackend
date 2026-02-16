@@ -21,8 +21,11 @@ router.post('/technician/login', async (req, res) => {
 
         const technician = await Technician.findOne({
             name: new RegExp(`^${escapeRegex(name)}$`, 'i'),
-            employee_id,
-            status: 'active'
+            employee_id: new RegExp(`^${escapeRegex(employee_id)}$`, 'i'),
+            $or: [
+                { status: 'active' },
+                { status: { $exists: false } }
+            ]
         });
 
         if (!technician) {
