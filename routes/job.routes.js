@@ -14,6 +14,17 @@ function calculateAggregatedProgress(jobDoc) {
 
     if (!subtasks.length) {
         totals.overall = job?.progress_percentage || 0;
+
+        const allocated = Number(job?.allocated_hours || 0) || 0;
+        const assignments = job?.technicians || [];
+        if (allocated > 0 && assignments.length) {
+            for (const t of assignments) {
+                const techId = t?.technician_id?.toString?.() || String(t?.technician_id || '');
+                if (!techId) continue;
+                const consumed = Number(t?.consumed_hours || 0) || 0;
+                totals.byTechnician[techId] = Math.max(0, Math.min(100, (consumed / allocated) * 100));
+            }
+        }
         return totals;
     }
 
