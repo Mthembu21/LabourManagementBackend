@@ -134,8 +134,10 @@ router.put('/by-job/:jobNumber/assign-technician', requireSupervisor, async (req
             existing.technician_name = technicianName;
         }
 
-        // Ensure job stays pending until the newly assigned technician confirms
-        job.status = 'pending_confirmation';
+        // Do not block other technicians by resetting an already-active job back to pending_confirmation
+        if (!job.status) {
+            job.status = 'pending_confirmation';
+        }
 
         await job.save();
 
@@ -258,7 +260,10 @@ router.post('/', requireSupervisor, async (req, res) => {
                     });
                 }
 
-                existingJob.status = 'pending_confirmation';
+                // Do not block other technicians by resetting an already-active job back to pending_confirmation
+                if (!existingJob.status) {
+                    existingJob.status = 'pending_confirmation';
+                }
                 await existingJob.save();
 
                 const agg = calculateAggregatedProgress(existingJob);
