@@ -86,6 +86,56 @@ router.put('/by-job/:jobNumber/confirm', requireAuth, async (req, res) => {
     }
 });
 
+// Assign/add an additional technician to an existing job (by Job ID)
+router.put('/by-job/:jobNumber/assign-technician', requireSupervisor, async (req, res) => {
+    try {
+        const technicianId = req.body?.technician_id;
+        const technicianName = req.body?.technician_name || '';
+
+        if (!technicianId) {
+            return res.status(400).json({ error: 'technician_id is required' });
+        }
+
+        const job = await Job.findOne({ job_number: req.params.jobNumber });
+        if (!job) return res.status(404).json({ error: 'Job not found' });
+
+        const existing = (job.technicians || []).find(
+            (t) => t.technician_id && t.technician_id.toString() === String(technicianId)
+        );
+
+        if (!existing) {
+            job.technicians = job.technicians || [];
+            job.technicians.push({
+                technician_id: technicianId,
+                technician_name: technicianName,
+                confirmed_by_technician: false,
+                confirmed_date: null,
+                consumed_hours: 0
+            });
+        } else if (technicianName && !existing.technician_name) {
+            existing.technician_name = technicianName;
+        }
+
+        // Ensure job stays pending until the newly assigned technician confirms
+        job.status = 'pending_confirmation';
+
+        await job.save();
+
+        const agg = calculateAggregatedProgress(job);
+        const obj = job.toObject();
+        const firstTech = (obj.technicians || [])[0];
+        res.json({
+            ...obj,
+            assigned_technician_id: firstTech?.technician_id,
+            assigned_technician_name: firstTech?.technician_name,
+            aggregated_progress_percentage: agg.overall,
+            progress_by_technician: agg.byTechnician
+        });
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
 // Get all jobs
 router.get('/', requireAuth, async (req, res) => {
     try {
