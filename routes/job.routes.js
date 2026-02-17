@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Job = require('../models/Job');
+const Technician = require('../models/Technician');
 const { requireAuth, requireSupervisor } = require('../middleware/auth');
 
 function calculateAggregatedProgress(jobDoc) {
@@ -101,7 +102,7 @@ router.put('/by-job/:jobNumber/confirm', requireAuth, async (req, res) => {
 router.put('/by-job/:jobNumber/assign-technician', requireSupervisor, async (req, res) => {
     try {
         const technicianId = req.body?.technician_id;
-        const technicianName = req.body?.technician_name || '';
+        let technicianName = req.body?.technician_name || '';
 
         if (!technicianId) {
             return res.status(400).json({ error: 'technician_id is required' });
@@ -109,6 +110,12 @@ router.put('/by-job/:jobNumber/assign-technician', requireSupervisor, async (req
 
         const job = await Job.findOne({ job_number: req.params.jobNumber });
         if (!job) return res.status(404).json({ error: 'Job not found' });
+
+        if (!technicianName) {
+            const tech = await Technician.findById(technicianId);
+            if (!tech) return res.status(400).json({ error: 'Technician not found' });
+            technicianName = tech.name;
+        }
 
         const existing = (job.technicians || []).find(
             (t) => t.technician_id && t.technician_id.toString() === String(technicianId)
@@ -217,6 +224,56 @@ router.post('/', requireSupervisor, async (req, res) => {
         const body = req.body || {};
         const technicians = Array.isArray(body.technicians) ? body.technicians : [];
 
+        // If job_number already exists, treat this as "assign another technician" instead of creating a new job
+        if (body.job_number) {
+            const existingJob = await Job.findOne({ job_number: body.job_number });
+            if (existingJob) {
+                const technicianId = body.assigned_technician_id || body.technicians?.[0]?.technician_id;
+                let technicianName = body.assigned_technician_name || body.technicians?.[0]?.technician_name || '';
+
+                if (!technicianId) {
+                    return res.status(409).json({
+                        error: 'Job number already exists. Provide a technician to assign to this existing job.'
+                    });
+                }
+
+                if (!technicianName) {
+                    const tech = await Technician.findById(technicianId);
+                    if (!tech) return res.status(400).json({ error: 'Technician not found' });
+                    technicianName = tech.name;
+                }
+
+                const alreadyAssigned = (existingJob.technicians || []).some(
+                    (t) => t.technician_id && t.technician_id.toString() === String(technicianId)
+                );
+
+                if (!alreadyAssigned) {
+                    existingJob.technicians = existingJob.technicians || [];
+                    existingJob.technicians.push({
+                        technician_id: technicianId,
+                        technician_name: technicianName,
+                        confirmed_by_technician: false,
+                        confirmed_date: null,
+                        consumed_hours: 0
+                    });
+                }
+
+                existingJob.status = 'pending_confirmation';
+                await existingJob.save();
+
+                const agg = calculateAggregatedProgress(existingJob);
+                const obj = existingJob.toObject();
+                const firstTech = (obj.technicians || [])[0];
+                return res.json({
+                    ...obj,
+                    assigned_technician_id: firstTech?.technician_id,
+                    assigned_technician_name: firstTech?.technician_name,
+                    aggregated_progress_percentage: agg.overall,
+                    progress_by_technician: agg.byTechnician
+                });
+            }
+        }
+
         if (!technicians.length && body.assigned_technician_id) {
             technicians.push({
                 technician_id: body.assigned_technician_id,
@@ -234,6 +291,9 @@ router.post('/', requireSupervisor, async (req, res) => {
         await job.save();
         res.status(201).json(job);
     } catch (error) {
+        if (error && error.code === 11000) {
+            return res.status(409).json({ error: 'Job number already exists' });
+        }
         res.status(400).json({ error: error.message });
     }
 });
