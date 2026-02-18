@@ -78,13 +78,17 @@ const jobSchema = new mongoose.Schema({
         default: 0
     },
     remaining_hours: Number,
+    overrun_hours: {
+        type: Number,
+        default: 0
+    },
     progress_percentage: {
         type: Number,
         default: 0
     },
     status: {
         type: String,
-        enum: ['pending_confirmation', 'active', 'in_progress', 'completed', 'at_risk', 'over_allocated'],
+        enum: ['pending_confirmation', 'active', 'in_progress', 'completed', 'at_risk', 'over_allocated', 'overrun'],
         default: 'pending_confirmation'
     },
     subtasks: {
