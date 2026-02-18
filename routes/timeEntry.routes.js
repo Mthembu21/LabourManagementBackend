@@ -5,6 +5,20 @@ const Job = require('../models/Job');
 const JobReport = require('../models/JobReport');
 const { requireAuth } = require('../middleware/auth');
 
+const getHoursForDate = (dateObj) => {
+    const dayIndex = dateObj.getDay();
+    if (dayIndex === 5) return { hr: 7, productive: 6 }; // Friday
+    return { hr: 8, productive: 7 };
+};
+
+const getDayRange = (dateObj) => {
+    const start = new Date(dateObj);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    return { start, end };
+};
+
 // Get all time entries
 router.get('/', requireAuth, async (req, res) => {
     try {
@@ -32,9 +46,11 @@ router.post('/', requireAuth, async (req, res) => {
     try {
         const { timeEntry, report } = req.body;
         const productiveHours = Number(timeEntry?.productive_hours || 0);
+        const hrHours = Number(timeEntry?.hr_hours || 0);
         const technicianId = timeEntry?.technician_id;
         const technicianName = timeEntry?.technician_name;
         const jobNumber = timeEntry?.job_id;
+        const entryDate = timeEntry?.date ? new Date(timeEntry.date) : null;
 
         if (!jobNumber) {
             return res.status(400).json({ error: 'job_id (Job ID) is required' });
@@ -42,7 +58,45 @@ router.post('/', requireAuth, async (req, res) => {
         if (!technicianId) {
             return res.status(400).json({ error: 'technician_id is required' });
         }
-        
+
+        if (!entryDate || Number.isNaN(entryDate.getTime())) {
+            return res.status(400).json({ error: 'date is required' });
+        }
+
+        if (productiveHours < 0 || hrHours < 0) {
+            return res.status(400).json({ error: 'Hours must be non-negative' });
+        }
+
+        const jobForCheck = await Job.findOne({ job_number: jobNumber });
+        if (jobForCheck) {
+            const remaining = Number(jobForCheck.remaining_hours ?? ((jobForCheck.allocated_hours || 0) - (jobForCheck.consumed_hours || 0))) || 0;
+            if (productiveHours > remaining) {
+                return res.status(400).json({ error: 'Not enough remaining hours on this job' });
+            }
+        }
+
+        const { start, end } = getDayRange(entryDate);
+        const existing = await DailyTimeEntry.find({
+            technician_id: technicianId,
+            date: { $gte: start, $lt: end }
+        });
+        const totals = existing.reduce(
+            (acc, e) => {
+                acc.hr += Number(e.hr_hours || 0);
+                acc.productive += Number(e.productive_hours || 0);
+                return acc;
+            },
+            { hr: 0, productive: 0 }
+        );
+
+        const max = getHoursForDate(entryDate);
+        if ((totals.hr + hrHours) > max.hr + 1e-9) {
+            return res.status(400).json({ error: `Daily HR hours limit exceeded (${max.hr})` });
+        }
+        if ((totals.productive + productiveHours) > max.productive + 1e-9) {
+            return res.status(400).json({ error: `Daily productive hours limit exceeded (${max.productive})` });
+        }
+
         const entry = new DailyTimeEntry(timeEntry);
         await entry.save();
         
