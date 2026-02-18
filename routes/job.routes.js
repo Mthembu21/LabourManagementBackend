@@ -335,6 +335,8 @@ router.put('/:id', requireAuth, async (req, res) => {
 
         const body = req.body || {};
 
+        const prevAllocated = Number(job.allocated_hours || 0);
+
         // Legacy reassignment fields -> update first technician assignment
         if (body.assigned_technician_id) {
             const newFirst = {
@@ -380,6 +382,25 @@ router.put('/:id', requireAuth, async (req, res) => {
         for (const [key, value] of Object.entries(body)) {
             if (blocked.has(key)) continue;
             job.set(key, value);
+        }
+
+        // If allocated hours changed, keep derived metrics consistent
+        if (Object.prototype.hasOwnProperty.call(body, 'allocated_hours')) {
+            const allocated = Number(job.allocated_hours || 0);
+            const consumed = Number(job.consumed_hours || 0);
+            if (!Number.isNaN(allocated) && allocated >= 0 && allocated !== prevAllocated) {
+                const remaining = Math.max(0, allocated - consumed);
+                const overrunHours = Math.max(0, consumed - allocated);
+                const progress = allocated > 0 ? (consumed / allocated) * 100 : 0;
+
+                job.remaining_hours = remaining;
+                job.overrun_hours = overrunHours;
+                job.progress_percentage = Math.min(100, progress);
+
+                if (job.status !== 'completed') {
+                    job.status = consumed > allocated ? 'overrun' : 'in_progress';
+                }
+            }
         }
 
         await job.save();
