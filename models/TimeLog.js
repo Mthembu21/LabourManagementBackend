@@ -32,7 +32,7 @@ const timeLogSchema = new mongoose.Schema({
     },
     category: {
         type: String,
-        enum: IDLE_CATEGORIES,
+        enum: [...IDLE_CATEGORIES, null],
         default: null
     },
     is_idle: {

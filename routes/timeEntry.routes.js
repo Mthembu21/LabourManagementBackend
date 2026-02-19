@@ -198,7 +198,7 @@ router.post('/', requireAuth, async (req, res) => {
             if (!jobForCheck) {
                 return res.status(400).json({ error: 'Job not found' });
             }
-            const remaining = Number(jobForCheck.remaining_hours ?? ((jobForCheck.allocated_hours || 0) - (jobForCheck.consumed_hours || 0))) || 0;
+            const remaining = Math.max(0, (Number(jobForCheck.allocated_hours || 0) - Number(jobForCheck.consumed_hours || 0)));
             if (deltaHours > remaining) {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job' });
             }
@@ -355,7 +355,7 @@ router.put('/:id', requireAuth, async (req, res) => {
             const jobForCheck = await Job.findOne({ job_number: existing.job_id });
             if (!jobForCheck) return res.status(400).json({ error: 'Job not found' });
 
-            const remaining = Number(jobForCheck.remaining_hours ?? ((jobForCheck.allocated_hours || 0) - (jobForCheck.consumed_hours || 0))) || 0;
+            const remaining = Math.max(0, (Number(jobForCheck.allocated_hours || 0) - Number(jobForCheck.consumed_hours || 0)));
             const delta = newHours - Number(existing.hours_logged || 0);
             if (delta > remaining) {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job' });
