@@ -32,6 +32,31 @@ const getDayRange = (dateObj) => {
     return { start, end };
 };
 
+const reallocateDayNormalOvertime = async (technicianId, logDate) => {
+    const day = TimeLog.normalizeLogDate(logDate);
+    const { start, end } = getDayRange(day);
+    const logs = await TimeLog.find({
+        technician_id: technicianId,
+        log_date: { $gte: start, $lt: end }
+    }).sort({ createdAt: 1, _id: 1 });
+
+    const normalLimit = getNormalLimitForDate(day);
+    let normalRemaining = normalLimit;
+
+    for (const l of logs) {
+        const hrs = Number(l.hours_logged || 0);
+        const normal = Math.max(0, Math.min(hrs, normalRemaining));
+        const ot = Math.max(0, hrs - normal);
+        normalRemaining = Math.max(0, normalRemaining - normal);
+
+        if (Number(l.normal_hours || 0) !== normal || Number(l.overtime_hours || 0) !== ot) {
+            l.normal_hours = normal;
+            l.overtime_hours = ot;
+            await l.save();
+        }
+    }
+};
+
 const recalcJobProgress = async (jobId) => {
     const job = await Job.findOne({ job_number: jobId });
     if (!job) return null;
@@ -162,36 +187,44 @@ router.post('/', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'Cannot log more than 24 hours in a day' });
         }
 
-        const normalLimit = getNormalLimitForDate(logDate);
-        const normalUsed = existingDayLogs.reduce((sum, e) => sum + Number(e.normal_hours || 0), 0);
-        const normalRemaining = Math.max(0, normalLimit - normalUsed);
-        const normalHours = Math.min(hoursLogged, normalRemaining);
-        const overtimeHours = Math.max(0, hoursLogged - normalHours);
+        // If a log already exists for the same technician + job + day, merge into it
+        const existingSameJob = existingDayLogs.find((e) => String(e.job_id) === String(jobId));
+        const prevHoursForSameJob = existingSameJob ? Number(existingSameJob.hours_logged || 0) : 0;
+        const deltaHours = hoursLogged;
 
-        // Prevent logging to real jobs if job has no remaining hours
+        // Prevent logging to real jobs if job has no remaining hours (check delta only)
         if (!isIdle) {
             const jobForCheck = await Job.findOne({ job_number: jobId });
             if (!jobForCheck) {
                 return res.status(400).json({ error: 'Job not found' });
             }
             const remaining = Number(jobForCheck.remaining_hours ?? ((jobForCheck.allocated_hours || 0) - (jobForCheck.consumed_hours || 0))) || 0;
-            if (hoursLogged > remaining) {
+            if (deltaHours > remaining) {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job' });
             }
         }
 
-        const entry = new TimeLog({
-            technician_id: technicianId,
-            job_id: jobId,
-            hours_logged: hoursLogged,
-            log_date: logDate,
-            category: isIdle ? category : null,
-            is_idle: isIdle,
-            normal_hours: normalHours,
-            overtime_hours: overtimeHours
-        });
+        let entry;
+        if (existingSameJob) {
+            existingSameJob.hours_logged = prevHoursForSameJob + hoursLogged;
+            existingSameJob.is_idle = isIdle;
+            existingSameJob.category = isIdle ? category : null;
+            entry = await existingSameJob.save();
+        } else {
+            entry = new TimeLog({
+                technician_id: technicianId,
+                job_id: jobId,
+                hours_logged: hoursLogged,
+                log_date: logDate,
+                category: isIdle ? category : null,
+                is_idle: isIdle,
+                normal_hours: 0,
+                overtime_hours: 0
+            });
+            await entry.save();
+        }
 
-        await entry.save();
+        await reallocateDayNormalOvertime(technicianId, logDate);
         
         if (report && report.work_completed) {
             const jobReport = new JobReport({
@@ -215,8 +248,8 @@ router.post('/', requireAuth, async (req, res) => {
                 { job_number: jobId, 'technicians.technician_id': technicianId },
                 {
                     $inc: {
-                        consumed_hours: hoursLogged,
-                        'technicians.$.consumed_hours': hoursLogged
+                        consumed_hours: deltaHours,
+                        'technicians.$.consumed_hours': deltaHours
                     }
                 },
                 { new: true }
@@ -254,7 +287,7 @@ router.post('/', requireAuth, async (req, res) => {
         res.status(201).json(entry);
     } catch (error) {
         if (error && error.code === 11000) {
-            return res.status(400).json({ error: 'Duplicate log entry for same job and date (edit instead)' });
+            return res.status(400).json({ error: 'Duplicate log entry for same job and date' });
         }
         res.status(400).json({ error: error.message });
     }
