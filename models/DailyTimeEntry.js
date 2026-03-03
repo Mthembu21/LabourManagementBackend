@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 
 const dailyTimeEntrySchema = new mongoose.Schema({
+    supervisor_key: {
+        type: String,
+        enum: ['component', 'rebuild', 'pdis'],
+        default: 'component',
+        index: true
+    },
     technician_id: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Technician',

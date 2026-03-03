@@ -9,6 +9,12 @@ const IDLE_CATEGORIES = [
 ];
 
 const timeLogSchema = new mongoose.Schema({
+    supervisor_key: {
+        type: String,
+        enum: ['component', 'rebuild', 'pdis'],
+        default: 'component',
+        index: true
+    },
     technician_id: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Technician',
@@ -19,6 +25,15 @@ const timeLogSchema = new mongoose.Schema({
         type: String,
         required: true,
         index: true
+    },
+    subtask_id: {
+        type: String,
+        default: null,
+        index: true
+    },
+    subtask_title: {
+        type: String,
+        default: null
     },
     hours_logged: {
         type: Number,
@@ -57,8 +72,12 @@ const timeLogSchema = new mongoose.Schema({
 // Prevent duplicate log entries for same technician + job + date
 // (editing should use update endpoint)
 timeLogSchema.index(
-    { technician_id: 1, job_id: 1, log_date: 1 },
+    { technician_id: 1, job_id: 1, subtask_id: 1, log_date: 1 },
     { unique: true }
+);
+
+timeLogSchema.index(
+    { supervisor_key: 1, technician_id: 1, log_date: 1 }
 );
 
 timeLogSchema.statics.IDLE_CATEGORIES = IDLE_CATEGORIES;

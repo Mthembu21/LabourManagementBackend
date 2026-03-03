@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 
 const monthlyArchiveSchema = new mongoose.Schema({
+    supervisor_key: {
+        type: String,
+        enum: ['component', 'rebuild', 'pdis'],
+        default: 'component',
+        index: true
+    },
     month_year: {
         type: String,
         required: true

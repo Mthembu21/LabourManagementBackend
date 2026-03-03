@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 
 const jobReportSchema = new mongoose.Schema({
+    supervisor_key: {
+        type: String,
+        enum: ['component', 'rebuild', 'pdis'],
+        default: 'component',
+        index: true
+    },
     job_id: {
         type: String,
         required: true
@@ -36,5 +42,7 @@ const jobReportSchema = new mongoose.Schema({
 }, {
     timestamps: true
 });
+
+jobReportSchema.index({ supervisor_key: 1, date: -1 });
 
 module.exports = mongoose.model('JobReport', jobReportSchema);

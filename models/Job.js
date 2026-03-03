@@ -39,10 +39,38 @@ const subtaskProgressSchema = new mongoose.Schema({
     }
 }, { _id: false });
 
+const subtaskAssignmentSchema = new mongoose.Schema({
+    technician_id: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Technician',
+        required: true
+    },
+    technician_name: {
+        type: String,
+        required: true
+    },
+    allocated_hours: {
+        type: Number,
+        default: 0
+    }
+}, { _id: false });
+
 const subtaskSchema = new mongoose.Schema({
+    category: {
+        type: String,
+        default: null
+    },
     title: {
         type: String,
         required: true
+    },
+    allocated_hours: {
+        type: Number,
+        default: 0
+    },
+    assigned_technicians: {
+        type: [subtaskAssignmentSchema],
+        default: []
     },
     weight: {
         type: Number,
@@ -56,6 +84,12 @@ const subtaskSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const jobSchema = new mongoose.Schema({
+    supervisor_key: {
+        type: String,
+        enum: ['component', 'rebuild', 'pdis'],
+        default: 'component',
+        index: true
+    },
     job_number: {
         type: String,
         required: true,

@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 
 const technicianSchema = new mongoose.Schema({
+    supervisor_key: {
+        type: String,
+        enum: ['component', 'rebuild', 'pdis'],
+        default: 'component',
+        index: true
+    },
     name: {
         type: String,
         required: true

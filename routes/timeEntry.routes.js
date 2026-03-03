@@ -3,9 +3,32 @@ const router = express.Router();
 const TimeLog = require('../models/TimeLog');
 const Job = require('../models/Job');
 const JobReport = require('../models/JobReport');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, tenantQuery } = require('../middleware/auth');
 
 const IDLE_JOB_ID = 'IDLE / NON-PRODUCTIVE';
+
+const requireSelfOrSupervisor = (req, res, technicianId) => {
+    const user = req.session?.user;
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+    if (user.type === 'supervisor') return null;
+    if (user.type === 'technician' && String(user.id) === String(technicianId)) return null;
+    return res.status(403).json({ error: 'Not allowed' });
+};
+
+const getSubtaskAllocationForTechnician = (jobDoc, subtaskId, technicianId) => {
+    const job = jobDoc?.toObject ? jobDoc.toObject() : jobDoc;
+    const subtasks = job?.subtasks || [];
+    const st = subtasks.find((s) => s && s._id && s._id.toString() === String(subtaskId));
+    if (!st) return null;
+    const assigned = st.assigned_technicians || [];
+    const a = assigned.find((x) => x.technician_id && x.technician_id.toString() === String(technicianId));
+    if (!a) return null;
+    const alloc = Number(a.allocated_hours || 0);
+    return {
+        subtask_title: st.title || null,
+        allocated_hours: Number.isFinite(alloc) ? Math.max(0, alloc) : 0
+    };
+};
 
 router.get('/idle-categories', requireAuth, async (req, res) => {
     try {
@@ -20,8 +43,55 @@ router.get('/idle-categories', requireAuth, async (req, res) => {
 
 const getNormalLimitForDate = (dateObj) => {
     const dayIndex = dateObj.getDay();
+    if (dayIndex === 0 || dayIndex === 6) return 0; // Weekend => all overtime
     if (dayIndex === 5) return 7; // Friday
     return 8; // Mon-Thu (and weekend fallback)
+};
+
+const normalizeDayOnly = (d) => {
+    const dt = new Date(d);
+    dt.setHours(0, 0, 0, 0);
+    return dt;
+};
+
+const computeJobStatus = (jobDoc) => {
+    if (!jobDoc) return 'in_progress';
+    if (jobDoc.status === 'completed') return 'completed';
+
+    const allocated = Number(jobDoc.allocated_hours || 0);
+    const consumed = Number(jobDoc.consumed_hours || 0);
+    if (allocated > 0 && consumed > allocated) return 'overrun';
+
+    const today = normalizeDayOnly(new Date());
+    const target = jobDoc.target_completion_date ? normalizeDayOnly(jobDoc.target_completion_date) : null;
+    if (target && today > target) return 'at_risk';
+    if (Number(jobDoc.bottleneck_count || 0) >= 2) return 'at_risk';
+
+    if (target && today <= target) {
+        const remainingHours = Math.max(0, allocated - consumed);
+        let workdaysRemaining = 0;
+        const cursor = new Date(today);
+        while (cursor <= target) {
+            const day = cursor.getDay();
+            if (day !== 0 && day !== 6) workdaysRemaining += 1;
+            cursor.setDate(cursor.getDate() + 1);
+        }
+
+        const techIds = new Set();
+        for (const t of (jobDoc.technicians || [])) {
+            if (t?.technician_id) techIds.add(t.technician_id.toString());
+        }
+        for (const st of (jobDoc.subtasks || [])) {
+            for (const a of (st?.assigned_technicians || [])) {
+                if (a?.technician_id) techIds.add(a.technician_id.toString());
+            }
+        }
+        const assignedCount = techIds.size || 1;
+        const capacity = workdaysRemaining * 8 * assignedCount;
+        if (remainingHours > capacity + 1e-9) return 'at_risk';
+    }
+
+    return 'in_progress';
 };
 
 const getDayRange = (dateObj) => {
@@ -92,7 +162,7 @@ router.get('/', requireAuth, async (req, res) => {
     try {
         const { technician_id, category, start_date, end_date, is_idle } = req.query;
 
-        const query = {};
+        const query = { ...tenantQuery(req.tenant.supervisor_key) };
         if (technician_id) query.technician_id = technician_id;
         if (typeof is_idle !== 'undefined') query.is_idle = String(is_idle) === 'true';
         if (category) query.category = category;
@@ -112,6 +182,10 @@ router.get('/', requireAuth, async (req, res) => {
             if (!Object.keys(query.log_date).length) delete query.log_date;
         }
 
+        if (req.session.user?.type === 'technician') {
+            query.technician_id = req.session.user.id;
+        }
+
         const entries = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(500);
         res.json(entries);
     } catch (error) {
@@ -122,7 +196,10 @@ router.get('/', requireAuth, async (req, res) => {
 // Get time entries for a technician
 router.get('/technician/:technicianId', requireAuth, async (req, res) => {
     try {
+        const deny = requireSelfOrSupervisor(req, res, req.params.technicianId);
+        if (deny) return;
         const entries = await TimeLog.find({
+            ...tenantQuery(req.tenant.supervisor_key),
             technician_id: req.params.technicianId
         }).sort({ log_date: -1, createdAt: -1 }).limit(100);
         res.json(entries);
@@ -141,7 +218,12 @@ router.post('/', requireAuth, async (req, res) => {
 
         const technicianId = payload?.technician_id;
         const jobId = payload?.job_id;
+        const subtaskId = payload?.subtask_id ?? null;
         const entryDate = payload?.log_date ? new Date(payload.log_date) : (payload?.date ? new Date(payload.date) : null);
+
+        if (req.session.user?.type === 'technician' && String(req.session.user.id) !== String(technicianId)) {
+            return res.status(403).json({ error: 'Not allowed' });
+        }
 
         // Old payload may send productive_hours; new payload should send hours_logged
         const hoursLogged = Number(
@@ -178,6 +260,7 @@ router.post('/', requireAuth, async (req, res) => {
         const { start, end } = getDayRange(logDate);
 
         const existingDayLogs = await TimeLog.find({
+            ...tenantQuery(req.tenant.supervisor_key),
             technician_id: technicianId,
             log_date: { $gte: start, $lt: end }
         });
@@ -187,20 +270,58 @@ router.post('/', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'Cannot log more than 24 hours in a day' });
         }
 
-        // If a log already exists for the same technician + job + day, merge into it
-        const existingSameJob = existingDayLogs.find((e) => String(e.job_id) === String(jobId));
+        // If a log already exists for the same technician + job + subtask + day, merge into it
+        const existingSameJob = existingDayLogs.find((e) => String(e.job_id) === String(jobId) && String(e.subtask_id || '') === String(subtaskId || ''));
         const prevHoursForSameJob = existingSameJob ? Number(existingSameJob.hours_logged || 0) : 0;
         const deltaHours = hoursLogged;
 
-        // Prevent logging to real jobs if job has no remaining hours (check delta only)
+        let resolvedSubtaskTitle = null;
+        let jobForCheck = null;
+
+        // Prevent logging to real jobs if job has no remaining hours, enforce stage allocation,
+        // and block logging past target completion date.
         if (!isIdle) {
-            const jobForCheck = await Job.findOne({ job_number: jobId });
+            if (!subtaskId) {
+                return res.status(400).json({ error: 'subtask_id is required for job logs' });
+            }
+
+            jobForCheck = await Job.findOne({
+                ...tenantQuery(req.tenant.supervisor_key),
+                job_number: jobId
+            });
             if (!jobForCheck) {
                 return res.status(400).json({ error: 'Job not found' });
             }
+
+            if (jobForCheck.target_completion_date) {
+                const target = normalizeDayOnly(jobForCheck.target_completion_date);
+                const logDay = normalizeDayOnly(logDate);
+                if (logDay > target) {
+                    return res.status(400).json({ error: 'Cannot log hours past job target completion date' });
+                }
+            }
+
             const remaining = Math.max(0, (Number(jobForCheck.allocated_hours || 0) - Number(jobForCheck.consumed_hours || 0)));
             if (deltaHours > remaining) {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job' });
+            }
+
+            const allocation = getSubtaskAllocationForTechnician(jobForCheck, subtaskId, technicianId);
+            if (!allocation) {
+                return res.status(400).json({ error: 'Technician is not assigned to this job stage' });
+            }
+            resolvedSubtaskTitle = allocation.subtask_title;
+
+            const existingStageLogs = await TimeLog.find({
+                ...tenantQuery(req.tenant.supervisor_key),
+                technician_id: technicianId,
+                job_id: jobId,
+                subtask_id: String(subtaskId),
+                is_idle: false
+            });
+            const alreadyLogged = existingStageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+            if ((alreadyLogged + hoursLogged) > (allocation.allocated_hours + 1e-9)) {
+                return res.status(400).json({ error: 'Not enough remaining hours on this job stage' });
             }
         }
 
@@ -209,11 +330,16 @@ router.post('/', requireAuth, async (req, res) => {
             existingSameJob.hours_logged = prevHoursForSameJob + hoursLogged;
             existingSameJob.is_idle = isIdle;
             existingSameJob.category = isIdle ? category : null;
+            existingSameJob.subtask_id = isIdle ? null : String(subtaskId);
+            existingSameJob.subtask_title = isIdle ? null : resolvedSubtaskTitle;
             entry = await existingSameJob.save();
         } else {
             entry = new TimeLog({
+                supervisor_key: req.tenant.supervisor_key,
                 technician_id: technicianId,
                 job_id: jobId,
+                subtask_id: isIdle ? null : String(subtaskId),
+                subtask_title: isIdle ? null : resolvedSubtaskTitle,
                 hours_logged: hoursLogged,
                 log_date: logDate,
                 category: isIdle ? category : null,
@@ -228,59 +354,52 @@ router.post('/', requireAuth, async (req, res) => {
         
         if (report && report.work_completed) {
             const jobReport = new JobReport({
+                supervisor_key: req.tenant.supervisor_key,
                 ...report,
                 daily_time_entry_id: entry._id
             });
             await jobReport.save();
             
             if (report.has_bottleneck) {
-                const job = await Job.findOne({ job_number: jobId });
+                const job = await Job.findOne({
+                    ...tenantQuery(req.tenant.supervisor_key),
+                    job_number: jobId
+                });
                 if (job) {
                     job.bottleneck_count = (job.bottleneck_count || 0) + 1;
+                    const allocated = Number(job.allocated_hours || 0);
+                    const consumed = Number(job.consumed_hours || 0);
+                    if (allocated > 0 && consumed > allocated) {
+                        job.status = 'overrun';
+                    } else if ((job.bottleneck_count || 0) >= 2 && job.status !== 'completed') {
+                        job.status = 'at_risk';
+                    }
                     await job.save();
                 }
             }
         }
         
         if (!isIdle) {
-            // Update job totals and technician-specific totals by Job ID (job_number)
-            let job = await Job.findOneAndUpdate(
-                { job_number: jobId, 'technicians.technician_id': technicianId },
-                {
-                    $inc: {
-                        consumed_hours: deltaHours,
-                        'technicians.$.consumed_hours': deltaHours
-                    }
-                },
-                { new: true }
-            );
-
+            const job = jobForCheck || await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: jobId });
             if (job) {
+                job.consumed_hours = Number(job.consumed_hours || 0) + deltaHours;
+                const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(technicianId));
+                if (tech) {
+                    tech.consumed_hours = Number(tech.consumed_hours || 0) + deltaHours;
+                }
+
                 const newConsumed = Number(job.consumed_hours || 0);
                 const allocated = Number(job.allocated_hours || 0);
                 const overrunHours = Math.max(0, newConsumed - allocated);
                 const progress = allocated > 0 ? (newConsumed / allocated) * 100 : 0;
                 const remaining = Math.max(0, allocated - newConsumed);
 
-                let status = job.status;
-                if (job.status !== 'completed') {
-                    if (newConsumed > allocated) {
-                        status = 'overrun';
-                    } else {
-                        status = 'in_progress';
-                    }
-                }
+                job.remaining_hours = remaining;
+                job.overrun_hours = overrunHours;
+                job.progress_percentage = Math.min(100, progress);
+                job.status = computeJobStatus(job);
 
-                await Job.findByIdAndUpdate(
-                    job._id,
-                    {
-                        remaining_hours: remaining,
-                        progress_percentage: Math.min(100, progress),
-                        overrun_hours: overrunHours,
-                        status
-                    },
-                    { new: true }
-                );
+                await job.save();
             }
         }
         
@@ -296,7 +415,10 @@ router.post('/', requireAuth, async (req, res) => {
 // Delete all time entries
 router.delete('/all', requireAuth, async (req, res) => {
     try {
-        const result = await TimeLog.deleteMany({});
+        if (req.session.user?.type !== 'supervisor') {
+            return res.status(403).json({ error: 'Supervisor access required' });
+        }
+        const result = await TimeLog.deleteMany(tenantQuery(req.tenant.supervisor_key));
         res.json({ message: 'All time entries deleted', count: result.deletedCount });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -306,8 +428,10 @@ router.delete('/all', requireAuth, async (req, res) => {
 // Get a single time log
 router.get('/:id', requireAuth, async (req, res) => {
     try {
-        const entry = await TimeLog.findById(req.params.id);
+        const entry = await TimeLog.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id });
         if (!entry) return res.status(404).json({ error: 'Time log not found' });
+        const deny = requireSelfOrSupervisor(req, res, entry.technician_id);
+        if (deny) return;
         res.json(entry);
     } catch (error) {
         res.status(400).json({ error: error.message });
@@ -317,14 +441,16 @@ router.get('/:id', requireAuth, async (req, res) => {
 // Update a time log (edit instead of creating duplicate)
 router.put('/:id', requireAuth, async (req, res) => {
     try {
-        const existing = await TimeLog.findById(req.params.id);
+        const existing = await TimeLog.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id });
         if (!existing) return res.status(404).json({ error: 'Time log not found' });
-
+        const deny = requireSelfOrSupervisor(req, res, existing.technician_id);
+        if (deny) return;
         const payload = req.body?.timeLog || req.body || {};
 
         const newHours = Number(payload?.hours_logged);
         const newCategory = payload?.category ?? null;
         const isIdle = typeof payload?.is_idle !== 'undefined' ? !!payload.is_idle : !!existing.is_idle;
+        const subtaskId = payload?.subtask_id ?? existing.subtask_id ?? null;
 
         if (!newHours || newHours <= 0) return res.status(400).json({ error: 'hours_logged must be > 0' });
         if (isIdle && (!newCategory || !(TimeLog.IDLE_CATEGORIES || []).includes(newCategory))) {
@@ -345,44 +471,88 @@ router.put('/:id', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'Cannot log more than 24 hours in a day' });
         }
 
+        // For job logs: enforce stage assignment, stage cap, job cap, and target completion date
+        if (!isIdle) {
+            if (!subtaskId) return res.status(400).json({ error: 'subtask_id is required for job logs' });
+
+            const jobForCheck = await Job.findOne({
+                ...tenantQuery(req.tenant.supervisor_key),
+                job_number: existing.job_id
+            });
+            if (!jobForCheck) return res.status(400).json({ error: 'Job not found' });
+
+            if (jobForCheck.target_completion_date) {
+                const target = normalizeDayOnly(jobForCheck.target_completion_date);
+                const logDay = normalizeDayOnly(logDate);
+                if (logDay > target) {
+                    return res.status(400).json({ error: 'Cannot log hours past job target completion date' });
+                }
+            }
+
+            const allocation = getSubtaskAllocationForTechnician(jobForCheck, subtaskId, existing.technician_id);
+            if (!allocation) {
+                return res.status(400).json({ error: 'Technician is not assigned to this job stage' });
+            }
+
+            const otherStageLogs = await TimeLog.find({
+                ...tenantQuery(req.tenant.supervisor_key),
+                technician_id: existing.technician_id,
+                job_id: existing.job_id,
+                subtask_id: String(subtaskId),
+                is_idle: false,
+                _id: { $ne: existing._id }
+            });
+            const alreadyLoggedStage = otherStageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+            if ((alreadyLoggedStage + newHours) > (allocation.allocated_hours + 1e-9)) {
+                return res.status(400).json({ error: 'Not enough remaining hours on this job stage' });
+            }
+
+            const remainingJob = Math.max(0, (Number(jobForCheck.allocated_hours || 0) - Number(jobForCheck.consumed_hours || 0)));
+            const delta = newHours - Number(existing.hours_logged || 0);
+            if (delta > remainingJob) {
+                return res.status(400).json({ error: 'Not enough remaining hours on this job' });
+            }
+        }
+
         const normalLimit = getNormalLimitForDate(logDate);
         const normalUsed = otherDayLogs.reduce((sum, e) => sum + Number(e.normal_hours || 0), 0);
         const normalRemaining = Math.max(0, normalLimit - normalUsed);
         const normalHours = Math.min(newHours, normalRemaining);
         const overtimeHours = Math.max(0, newHours - normalHours);
 
-        if (!isIdle) {
-            const jobForCheck = await Job.findOne({ job_number: existing.job_id });
-            if (!jobForCheck) return res.status(400).json({ error: 'Job not found' });
-
-            const remaining = Math.max(0, (Number(jobForCheck.allocated_hours || 0) - Number(jobForCheck.consumed_hours || 0)));
-            const delta = newHours - Number(existing.hours_logged || 0);
-            if (delta > remaining) {
-                return res.status(400).json({ error: 'Not enough remaining hours on this job' });
-            }
-        }
-
         const prevHours = Number(existing.hours_logged || 0);
         existing.hours_logged = newHours;
         existing.is_idle = isIdle;
         existing.category = isIdle ? newCategory : null;
+        existing.subtask_id = isIdle ? null : String(subtaskId);
         existing.normal_hours = normalHours;
         existing.overtime_hours = overtimeHours;
         await existing.save();
 
+        await reallocateDayNormalOvertime(existing.technician_id, logDate);
+
         if (!existing.is_idle) {
             const delta = newHours - prevHours;
-            await Job.findOneAndUpdate(
-                { job_number: existing.job_id, 'technicians.technician_id': existing.technician_id },
-                {
-                    $inc: {
-                        consumed_hours: delta,
-                        'technicians.$.consumed_hours': delta
-                    }
-                },
-                { new: true }
-            );
-            await recalcJobProgress(existing.job_id);
+            const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: existing.job_id });
+            if (job) {
+                job.consumed_hours = Number(job.consumed_hours || 0) + delta;
+                const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(existing.technician_id));
+                if (tech) {
+                    tech.consumed_hours = Number(tech.consumed_hours || 0) + delta;
+                }
+
+                const newConsumed = Number(job.consumed_hours || 0);
+                const allocated = Number(job.allocated_hours || 0);
+                const remaining = Math.max(0, allocated - newConsumed);
+                const overrunHours = Math.max(0, newConsumed - allocated);
+                const progress = allocated > 0 ? (newConsumed / allocated) * 100 : 0;
+
+                job.remaining_hours = remaining;
+                job.overrun_hours = overrunHours;
+                job.progress_percentage = Math.min(100, progress);
+                job.status = computeJobStatus(job);
+                await job.save();
+            }
         }
 
         res.json(existing);
@@ -394,8 +564,10 @@ router.put('/:id', requireAuth, async (req, res) => {
 // Delete a time log
 router.delete('/:id', requireAuth, async (req, res) => {
     try {
-        const existing = await TimeLog.findById(req.params.id);
+        const existing = await TimeLog.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id });
         if (!existing) return res.status(404).json({ error: 'Time log not found' });
+        const deny = requireSelfOrSupervisor(req, res, existing.technician_id);
+        if (deny) return;
 
         const hours = Number(existing.hours_logged || 0);
         const jobId = existing.job_id;
