@@ -426,7 +426,7 @@ router.post('/', requireSupervisor, async (req, res) => {
         res.status(201).json(job);
     } catch (error) {
         if (error && error.code === 11000) {
-            return res.status(409).json({ error: 'Job number already exists' });
+            return res.status(409).json({ error: 'Job number already exists (possibly in another tenant). Use a different job number or migrate the DB index to be unique per supervisor_key.' });
         }
         res.status(400).json({ error: error.message });
     }

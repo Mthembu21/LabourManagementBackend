@@ -93,7 +93,7 @@ const jobSchema = new mongoose.Schema({
     job_number: {
         type: String,
         required: true,
-        unique: true
+        index: true
     },
     description: {
         type: String,
@@ -151,5 +151,7 @@ const jobSchema = new mongoose.Schema({
 }, {
     timestamps: true
 });
+
+jobSchema.index({ supervisor_key: 1, job_number: 1 }, { unique: true });
 
 module.exports = mongoose.model('Job', jobSchema);
