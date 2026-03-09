@@ -5,7 +5,8 @@ const IDLE_CATEGORIES = [
     'Sick',
     'Training',
     'Travelling',
-    'Site Work'
+    'Site Work',
+    'Other'
 ];
 
 const timeLogSchema = new mongoose.Schema({
@@ -49,6 +50,10 @@ const timeLogSchema = new mongoose.Schema({
         type: String,
         enum: [...IDLE_CATEGORIES, null],
         default: null
+    },
+    category_detail: {
+        type: String,
+        default: ''
     },
     is_idle: {
         type: Boolean,

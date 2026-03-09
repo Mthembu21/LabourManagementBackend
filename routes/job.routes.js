@@ -123,11 +123,14 @@ function calculateAggregatedProgress(jobDoc) {
 
     const subtaskAggregated = subtasks.map((st) => {
         const entries = st.progress_by_technician || [];
-        const summed = entries.reduce((s, e) => s + (e.progress_percentage || 0), 0);
+        const valid = (entries || []).filter((e) => typeof e?.progress_percentage === 'number');
+        const avg = valid.length
+            ? valid.reduce((s, e) => s + (e.progress_percentage || 0), 0) / valid.length
+            : 0;
         return {
             id: st._id?.toString?.() || st.id,
             weight: typeof st.weight === 'number' ? st.weight : 1,
-            aggregated: Math.max(0, Math.min(100, summed)),
+            aggregated: Math.max(0, Math.min(100, avg)),
             entries
         };
     });

@@ -15,6 +15,43 @@ const requireSelfOrSupervisor = (req, res, technicianId) => {
     return res.status(403).json({ error: 'Not allowed' });
 };
 
+const isJobFullyCompleteByAssignments = (jobDoc) => {
+    if (!jobDoc) return false;
+    const subtasks = jobDoc.subtasks || [];
+    if (!subtasks.length) return false;
+
+    // Consider a subtask "required" only if it has explicit technician assignments.
+    const requiredSubtasks = subtasks.filter((st) => Array.isArray(st?.assigned_technicians) && st.assigned_technicians.length > 0);
+    if (!requiredSubtasks.length) return false;
+
+    for (const st of requiredSubtasks) {
+        for (const a of (st.assigned_technicians || [])) {
+            const techId = a?.technician_id;
+            if (!techId) return false;
+            const p = (st.progress_by_technician || []).find((x) => String(x?.technician_id) === String(techId));
+            const pct = Number(p?.progress_percentage || 0);
+            if (pct < 100 - 1e-9) return false;
+        }
+    }
+    return true;
+};
+
+const upsertSubtaskProgressForTechnician = (jobDoc, subtaskId, technicianId, progressPct) => {
+    if (!jobDoc || !subtaskId || !technicianId) return;
+    const st = (jobDoc.subtasks || []).id(subtaskId);
+    if (!st) return;
+
+    st.progress_by_technician = Array.isArray(st.progress_by_technician) ? st.progress_by_technician : [];
+    const existing = st.progress_by_technician.find((p) => String(p?.technician_id) === String(technicianId));
+    const pct = Math.max(0, Math.min(100, Number(progressPct || 0)));
+    if (existing) {
+        existing.progress_percentage = pct;
+        existing.updated_at = new Date();
+    } else {
+        st.progress_by_technician.push({ technician_id: technicianId, progress_percentage: pct, updated_at: new Date() });
+    }
+};
+
 const getSubtaskAllocationForTechnician = (jobDoc, subtaskId, technicianId) => {
     const job = jobDoc?.toObject ? jobDoc.toObject() : jobDoc;
     const subtasks = job?.subtasks || [];
@@ -236,6 +273,7 @@ router.post('/', requireAuth, async (req, res) => {
             ? !!payload.is_idle
             : (jobId === IDLE_JOB_ID);
         const category = payload?.category ?? null;
+        const categoryDetail = typeof payload?.category_detail === 'string' ? payload.category_detail : '';
 
         if (!technicianId) return res.status(400).json({ error: 'technician_id is required' });
         if (!jobId) return res.status(400).json({ error: 'job_id is required' });
@@ -252,6 +290,10 @@ router.post('/', requireAuth, async (req, res) => {
             const allowed = TimeLog.IDLE_CATEGORIES || [];
             if (!allowed.includes(category)) {
                 return res.status(400).json({ error: 'Invalid category' });
+            }
+
+            if (category === 'Other' && !String(categoryDetail || '').trim()) {
+                return res.status(400).json({ error: 'category_detail is required when category is Other' });
             }
         }
 
@@ -296,9 +338,7 @@ router.post('/', requireAuth, async (req, res) => {
             if (jobForCheck.target_completion_date) {
                 const target = normalizeDayOnly(jobForCheck.target_completion_date);
                 const logDay = normalizeDayOnly(logDate);
-                if (logDay > target) {
-                    return res.status(400).json({ error: 'Cannot log hours past job target completion date' });
-                }
+                // Allow logging past target date; job will be considered at-risk.
             }
 
             const remaining = Math.max(0, (Number(jobForCheck.allocated_hours || 0) - Number(jobForCheck.consumed_hours || 0)));
@@ -330,6 +370,7 @@ router.post('/', requireAuth, async (req, res) => {
             existingSameJob.hours_logged = prevHoursForSameJob + hoursLogged;
             existingSameJob.is_idle = isIdle;
             existingSameJob.category = isIdle ? category : null;
+            existingSameJob.category_detail = isIdle ? String(categoryDetail || '') : '';
             existingSameJob.subtask_id = isIdle ? null : String(subtaskId);
             existingSameJob.subtask_title = isIdle ? null : resolvedSubtaskTitle;
             entry = await existingSameJob.save();
@@ -343,6 +384,7 @@ router.post('/', requireAuth, async (req, res) => {
                 hours_logged: hoursLogged,
                 log_date: logDate,
                 category: isIdle ? category : null,
+                category_detail: isIdle ? String(categoryDetail || '') : '',
                 is_idle: isIdle,
                 normal_hours: 0,
                 overtime_hours: 0
@@ -388,6 +430,18 @@ router.post('/', requireAuth, async (req, res) => {
                     tech.consumed_hours = Number(tech.consumed_hours || 0) + deltaHours;
                 }
 
+                // Auto-update subtask progress for this technician based on allocated stage hours
+                // (so progress is not stuck at zero unless manually edited)
+                if (subtaskId) {
+                    const allocation = getSubtaskAllocationForTechnician(job, subtaskId, technicianId);
+                    const allocHours = Number(allocation?.allocated_hours || 0);
+                    if (allocHours > 0) {
+                        const newStageHours = alreadyLogged + hoursLogged;
+                        const pct = (newStageHours / allocHours) * 100;
+                        upsertSubtaskProgressForTechnician(job, subtaskId, technicianId, pct);
+                    }
+                }
+
                 const newConsumed = Number(job.consumed_hours || 0);
                 const allocated = Number(job.allocated_hours || 0);
                 const overrunHours = Math.max(0, newConsumed - allocated);
@@ -398,6 +452,15 @@ router.post('/', requireAuth, async (req, res) => {
                 job.overrun_hours = overrunHours;
                 job.progress_percentage = Math.min(100, progress);
                 job.status = computeJobStatus(job);
+
+                // Auto-complete when all assigned stages are complete
+                if (job.status !== 'completed' && isJobFullyCompleteByAssignments(job)) {
+                    job.status = 'completed';
+                    job.progress_percentage = 100;
+                    job.remaining_hours = 0;
+                    job.actual_completion_date = new Date();
+                    job.total_hours_utilized = Number(job.consumed_hours || 0);
+                }
 
                 await job.save();
             }
