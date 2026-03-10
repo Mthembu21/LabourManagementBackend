@@ -421,6 +421,8 @@ router.post('/', requireAuth, async (req, res) => {
             }
         }
         
+        let alreadyLoggedStageHours = 0;
+
         if (!isIdle) {
             const job = jobForCheck || await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: jobId });
             if (job) {
@@ -436,7 +438,16 @@ router.post('/', requireAuth, async (req, res) => {
                     const allocation = getSubtaskAllocationForTechnician(job, subtaskId, technicianId);
                     const allocHours = Number(allocation?.allocated_hours || 0);
                     if (allocHours > 0) {
-                        const newStageHours = alreadyLogged + hoursLogged;
+                        const existingStageLogs = await TimeLog.find({
+                            ...tenantQuery(req.tenant.supervisor_key),
+                            technician_id: technicianId,
+                            job_id: jobId,
+                            subtask_id: String(subtaskId),
+                            is_idle: false
+                        });
+                        alreadyLoggedStageHours = existingStageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+
+                        const newStageHours = alreadyLoggedStageHours + hoursLogged;
                         const pct = (newStageHours / allocHours) * 100;
                         upsertSubtaskProgressForTechnician(job, subtaskId, technicianId, pct);
                     }
