@@ -465,7 +465,12 @@ router.post('/', requireAuth, async (req, res) => {
                 job.status = computeJobStatus(job);
 
                 // Auto-complete when all assigned stages are complete
-                if (job.status !== 'completed' && isJobFullyCompleteByAssignments(job)) {
+                const allocatedTotal = Number(job.allocated_hours || 0);
+                const hasNoRemainingAllocatedHours = allocatedTotal > 0
+                    ? (Number(job.remaining_hours || 0) <= 1e-6)
+                    : false;
+
+                if (job.status !== 'completed' && isJobFullyCompleteByAssignments(job) && hasNoRemainingAllocatedHours) {
                     job.status = 'completed';
                     job.progress_percentage = 100;
                     job.remaining_hours = 0;
