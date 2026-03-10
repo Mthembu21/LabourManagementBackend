@@ -485,7 +485,11 @@ router.post('/', requireAuth, async (req, res) => {
         res.status(201).json(entry);
     } catch (error) {
         if (error && error.code === 11000) {
-            return res.status(400).json({ error: 'Duplicate log entry for same job and date' });
+            const keys = error?.keyPattern || error?.keyValue || {};
+            const hint = (keys && (keys.log_date || keys.job_id) && !keys.subtask_id)
+                ? ' (Your database likely still has an old unique index on {technician_id, job_id, log_date}. Drop that index so {technician_id, job_id, subtask_id, log_date} is the unique key.)'
+                : '';
+            return res.status(400).json({ error: `Duplicate log entry for same job and date${hint}` });
         }
         res.status(400).json({ error: error.message });
     }
