@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const MonthlyArchive = require('../models/MonthlyArchive');
-const DailyTimeEntry = require('../models/DailyTimeEntry');
+const TimeLog = require('../models/TimeLog');
+const JobReport = require('../models/JobReport');
 const { requireSupervisor, tenantQuery } = require('../middleware/auth');
 
 // Get all archives
@@ -22,7 +23,8 @@ router.post('/', requireSupervisor, async (req, res) => {
             supervisor_key: req.tenant.supervisor_key
         });
         await archive.save();
-        await DailyTimeEntry.deleteMany(tenantQuery(req.tenant.supervisor_key));
+        await TimeLog.deleteMany(tenantQuery(req.tenant.supervisor_key));
+        await JobReport.deleteMany(tenantQuery(req.tenant.supervisor_key));
         res.status(201).json(archive);
     } catch (error) {
         res.status(400).json({ error: error.message });

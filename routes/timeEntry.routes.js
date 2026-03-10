@@ -81,8 +81,8 @@ router.get('/idle-categories', requireAuth, async (req, res) => {
 const getNormalLimitForDate = (dateObj) => {
     const dayIndex = dateObj.getDay();
     if (dayIndex === 0 || dayIndex === 6) return 0; // Weekend => all overtime
-    if (dayIndex === 5) return 7; // Friday
-    return 8; // Mon-Thu (and weekend fallback)
+    if (dayIndex === 5) return 7.5; // Friday (7h productive + 0.5h lunch)
+    return 8.5; // Mon-Thu (8h productive + 0.5h lunch)
 };
 
 const normalizeDayOnly = (d) => {
