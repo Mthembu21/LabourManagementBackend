@@ -322,9 +322,13 @@ router.get('/', requireAuth, async (req, res) => {
 // Get jobs for a technician
 router.get('/technician/:technicianId', requireAuth, async (req, res) => {
     try {
+        const technicianId = req.params.technicianId;
         const jobs = await Job.find({
             ...tenantQuery(req.tenant.supervisor_key),
-            'technicians.technician_id': req.params.technicianId
+            $or: [
+                { 'technicians.technician_id': technicianId },
+                { 'subtasks.assigned_technicians.technician_id': technicianId }
+            ]
         }).sort({ createdAt: -1 }).limit(200);
         const enriched = await enrichJobsWithTimeLogProgress(jobs, req.tenant.supervisor_key);
         res.json(enriched);
