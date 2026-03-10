@@ -535,6 +535,7 @@ router.put('/:id', requireAuth, async (req, res) => {
         const { start, end } = getDayRange(logDate);
 
         const otherDayLogs = await TimeLog.find({
+            ...tenantQuery(req.tenant.supervisor_key),
             technician_id: existing.technician_id,
             log_date: { $gte: start, $lt: end },
             _id: { $ne: existing._id }
@@ -554,14 +555,6 @@ router.put('/:id', requireAuth, async (req, res) => {
                 job_number: existing.job_id
             });
             if (!jobForCheck) return res.status(400).json({ error: 'Job not found' });
-
-            if (jobForCheck.target_completion_date) {
-                const target = normalizeDayOnly(jobForCheck.target_completion_date);
-                const logDay = normalizeDayOnly(logDate);
-                if (logDay > target) {
-                    return res.status(400).json({ error: 'Cannot log hours past job target completion date' });
-                }
-            }
 
             const allocation = getSubtaskAllocationForTechnician(jobForCheck, subtaskId, existing.technician_id);
             if (!allocation) {
@@ -615,6 +608,23 @@ router.put('/:id', requireAuth, async (req, res) => {
                     tech.consumed_hours = Number(tech.consumed_hours || 0) + delta;
                 }
 
+                const stId = existing.subtask_id;
+                if (stId) {
+                    const allocation = getSubtaskAllocationForTechnician(job, stId, existing.technician_id);
+                    const allocHours = Number(allocation?.allocated_hours || 0);
+                    if (allocHours > 0) {
+                        const stageLogs = await TimeLog.find({
+                            ...tenantQuery(req.tenant.supervisor_key),
+                            technician_id: existing.technician_id,
+                            job_id: existing.job_id,
+                            subtask_id: String(stId),
+                            is_idle: false
+                        });
+                        const stageSum = stageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+                        upsertSubtaskProgressForTechnician(job, stId, existing.technician_id, (stageSum / allocHours) * 100);
+                    }
+                }
+
                 const newConsumed = Number(job.consumed_hours || 0);
                 const allocated = Number(job.allocated_hours || 0);
                 const remaining = Math.max(0, allocated - newConsumed);
@@ -647,21 +657,43 @@ router.delete('/:id', requireAuth, async (req, res) => {
         const jobId = existing.job_id;
         const technicianId = existing.technician_id;
         const isIdle = !!existing.is_idle;
+        const subtaskId = existing.subtask_id;
 
         await TimeLog.deleteOne({ _id: existing._id });
 
         if (!isIdle) {
-            await Job.findOneAndUpdate(
-                { job_number: jobId, 'technicians.technician_id': technicianId },
-                {
-                    $inc: {
-                        consumed_hours: -hours,
-                        'technicians.$.consumed_hours': -hours
+            const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: jobId });
+            if (job) {
+                job.consumed_hours = Math.max(0, Number(job.consumed_hours || 0) - hours);
+                const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(technicianId));
+                if (tech) {
+                    tech.consumed_hours = Math.max(0, Number(tech.consumed_hours || 0) - hours);
+                }
+
+                if (subtaskId) {
+                    const allocation = getSubtaskAllocationForTechnician(job, subtaskId, technicianId);
+                    const allocHours = Number(allocation?.allocated_hours || 0);
+                    if (allocHours > 0) {
+                        const stageLogs = await TimeLog.find({
+                            ...tenantQuery(req.tenant.supervisor_key),
+                            technician_id: technicianId,
+                            job_id: jobId,
+                            subtask_id: String(subtaskId),
+                            is_idle: false
+                        });
+                        const stageSum = stageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+                        upsertSubtaskProgressForTechnician(job, subtaskId, technicianId, (stageSum / allocHours) * 100);
                     }
-                },
-                { new: true }
-            );
-            await recalcJobProgress(jobId);
+                }
+
+                const allocated = Number(job.allocated_hours || 0);
+                const consumed = Number(job.consumed_hours || 0);
+                job.remaining_hours = Math.max(0, allocated - consumed);
+                job.overrun_hours = Math.max(0, consumed - allocated);
+                job.progress_percentage = allocated > 0 ? Math.min(100, (consumed / allocated) * 100) : 0;
+                job.status = computeJobStatus(job);
+                await job.save();
+            }
         }
 
         res.json({ message: 'Time log deleted' });
