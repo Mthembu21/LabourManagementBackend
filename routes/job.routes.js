@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Job = require('../models/Job');
 const Technician = require('../models/Technician');
+const TimeLog = require('../models/TimeLog');
 const { requireAuth, requireSupervisor, tenantQuery } = require('../middleware/auth');
 
 const DEFAULT_SUBTASK_TITLES = ['Washing', 'Stripping', 'Assembling & Painting', 'Testing'];
@@ -94,65 +95,128 @@ function getDefaultSubtasks() {
     }));
 }
 
-function calculateAggregatedProgress(jobDoc) {
-    const job = jobDoc?.toObject ? jobDoc.toObject() : jobDoc;
-    const subtasks = job?.subtasks || [];
+async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
+    const docs = Array.isArray(jobDocs) ? jobDocs : (jobDocs ? [jobDocs] : []);
+    if (!docs.length) return [];
 
-    const totals = {
-        overall: 0,
-        byTechnician: {}
-    };
+    const jobNumbers = docs.map((j) => j?.job_number).filter(Boolean);
+    if (!jobNumbers.length) {
+        return docs.map((j) => {
+            const obj = j.toObject();
+            const firstTech = (obj.technicians || [])[0];
+            return {
+                ...obj,
+                status: computeDerivedStatus(obj),
+                assigned_technician_id: firstTech?.technician_id,
+                assigned_technician_name: firstTech?.technician_name,
+                aggregated_progress_percentage: 0,
+                progress_by_technician: {}
+            };
+        });
+    }
 
-    if (!subtasks.length) {
-        totals.overall = job?.progress_percentage || 0;
-
-        const allocated = Number(job?.allocated_hours || 0) || 0;
-        const assignments = job?.technicians || [];
-        if (allocated > 0 && assignments.length) {
-            for (const t of assignments) {
-                const techId = t?.technician_id?.toString?.() || String(t?.technician_id || '');
-                if (!techId) continue;
-                const consumed = Number(t?.consumed_hours || 0) || 0;
-                totals.byTechnician[techId] = Math.max(0, Math.min(100, (consumed / allocated) * 100));
+    const logAgg = await TimeLog.aggregate([
+        {
+            $match: {
+                supervisor_key: supervisorKey,
+                is_idle: false,
+                job_id: { $in: jobNumbers },
+                subtask_id: { $ne: null }
+            }
+        },
+        {
+            $group: {
+                _id: {
+                    job_id: '$job_id',
+                    subtask_id: '$subtask_id',
+                    technician_id: '$technician_id'
+                },
+                consumed: { $sum: '$hours_logged' }
             }
         }
-        return totals;
+    ]);
+
+    const consumedByJob = new Map();
+    const consumedByJobSubtaskTech = new Map();
+    const consumedByJobTech = new Map();
+
+    for (const row of logAgg) {
+        const jobId = String(row?._id?.job_id || '');
+        const subtaskId = String(row?._id?.subtask_id || '');
+        const techId = String(row?._id?.technician_id || '');
+        const hrs = Number(row?.consumed || 0);
+        if (!jobId || !subtaskId || !techId) continue;
+
+        const key = `${jobId}:${subtaskId}:${techId}`;
+        consumedByJobSubtaskTech.set(key, hrs);
+        consumedByJob.set(jobId, (consumedByJob.get(jobId) || 0) + hrs);
+        consumedByJobTech.set(`${jobId}:${techId}`, (consumedByJobTech.get(`${jobId}:${techId}`) || 0) + hrs);
     }
 
-    const totalWeight = subtasks.reduce((sum, st) => sum + (typeof st.weight === 'number' ? st.weight : 1), 0) || 1;
+    return docs.map((j) => {
+        const obj = j.toObject();
+        const firstTech = (obj.technicians || [])[0];
+        const jobAllocated = Number(obj.allocated_hours || 0);
 
-    const subtaskAggregated = subtasks.map((st) => {
-        const entries = st.progress_by_technician || [];
-        const valid = (entries || []).filter((e) => typeof e?.progress_percentage === 'number');
-        const avg = valid.length
-            ? valid.reduce((s, e) => s + (e.progress_percentage || 0), 0) / valid.length
+        const totalConsumedAcrossSubtasks = consumedByJob.get(String(obj.job_number)) || 0;
+        const overall = jobAllocated > 0
+            ? Math.max(0, Math.min(100, (totalConsumedAcrossSubtasks / jobAllocated) * 100))
             : 0;
+
+        const progressByTechnician = {};
+        const techIds = new Set();
+        for (const t of (obj.technicians || [])) {
+            if (t?.technician_id) techIds.add(String(t.technician_id));
+        }
+        for (const st of (obj.subtasks || [])) {
+            for (const a of (st?.assigned_technicians || [])) {
+                if (a?.technician_id) techIds.add(String(a.technician_id));
+            }
+        }
+        for (const techId of techIds) {
+            const consumedForTech = consumedByJobTech.get(`${String(obj.job_number)}:${techId}`) || 0;
+            progressByTechnician[techId] = jobAllocated > 0
+                ? Math.max(0, Math.min(100, (consumedForTech / jobAllocated) * 100))
+                : 0;
+        }
+
+        const subtasks = (obj.subtasks || []).map((st) => {
+            const subtaskId = String(st?._id || st?.id || '');
+            const subtaskAllocated = Number(st?.allocated_hours || 0);
+            const allocatedHours = subtaskAllocated > 0 ? subtaskAllocated : jobAllocated;
+
+            const assigned = Array.isArray(st?.assigned_technicians) ? st.assigned_technicians : [];
+            const nextProgress = assigned.map((a) => {
+                const techId = String(a?.technician_id || '');
+                const consumed = techId && subtaskId
+                    ? (consumedByJobSubtaskTech.get(`${String(obj.job_number)}:${subtaskId}:${techId}`) || 0)
+                    : 0;
+                const pct = allocatedHours > 0
+                    ? Math.max(0, Math.min(100, (consumed / allocatedHours) * 100))
+                    : 0;
+                return {
+                    technician_id: a.technician_id,
+                    progress_percentage: pct,
+                    updated_at: new Date()
+                };
+            });
+
+            return {
+                ...st,
+                progress_by_technician: nextProgress
+            };
+        });
+
         return {
-            id: st._id?.toString?.() || st.id,
-            weight: typeof st.weight === 'number' ? st.weight : 1,
-            aggregated: Math.max(0, Math.min(100, avg)),
-            entries
+            ...obj,
+            subtasks,
+            status: computeDerivedStatus(obj),
+            assigned_technician_id: firstTech?.technician_id,
+            assigned_technician_name: firstTech?.technician_name,
+            aggregated_progress_percentage: overall,
+            progress_by_technician: progressByTechnician
         };
     });
-
-    totals.overall = subtaskAggregated.reduce((sum, st) => sum + (st.aggregated * st.weight), 0) / totalWeight;
-
-    const techIds = new Set();
-    for (const st of subtaskAggregated) {
-        for (const e of st.entries || []) {
-            if (e.technician_id) techIds.add(e.technician_id.toString());
-        }
-    }
-
-    for (const techId of techIds) {
-        const weighted = subtaskAggregated.reduce((sum, st) => {
-            const match = (st.entries || []).find((e) => e.technician_id && e.technician_id.toString() === techId);
-            return sum + ((match?.progress_percentage || 0) * st.weight);
-        }, 0);
-        totals.byTechnician[techId] = weighted / totalWeight;
-    }
-
-    return totals;
 }
 
 // Confirm/accept a job assignment for a technician (by Job ID)
@@ -179,16 +243,8 @@ router.put('/by-job/:jobNumber/confirm', requireAuth, async (req, res) => {
 
         await job.save();
 
-        const agg = calculateAggregatedProgress(job);
-        const obj = job.toObject();
-        const firstTech = (obj.technicians || [])[0];
-        res.json({
-            ...obj,
-            assigned_technician_id: firstTech?.technician_id,
-            assigned_technician_name: firstTech?.technician_name,
-            aggregated_progress_percentage: agg.overall,
-            progress_by_technician: agg.byTechnician
-        });
+        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        res.json(enriched[0]);
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -243,16 +299,8 @@ router.put('/by-job/:jobNumber/assign-technician', requireSupervisor, async (req
 
         await job.save();
 
-        const agg = calculateAggregatedProgress(job);
-        const obj = job.toObject();
-        const firstTech = (obj.technicians || [])[0];
-        res.json({
-            ...obj,
-            assigned_technician_id: firstTech?.technician_id,
-            assigned_technician_name: firstTech?.technician_name,
-            aggregated_progress_percentage: agg.overall,
-            progress_by_technician: agg.byTechnician
-        });
+        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        res.json(enriched[0]);
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -264,19 +312,7 @@ router.get('/', requireAuth, async (req, res) => {
         const jobs = await Job.find({
             ...tenantQuery(req.tenant.supervisor_key)
         }).sort({ createdAt: -1 }).limit(200);
-        const enriched = jobs.map((j) => {
-            const agg = calculateAggregatedProgress(j);
-            const obj = j.toObject();
-            const firstTech = (obj.technicians || [])[0];
-            return {
-                ...obj,
-                status: computeDerivedStatus(obj),
-                assigned_technician_id: firstTech?.technician_id,
-                assigned_technician_name: firstTech?.technician_name,
-                aggregated_progress_percentage: agg.overall,
-                progress_by_technician: agg.byTechnician
-            };
-        });
+        const enriched = await enrichJobsWithTimeLogProgress(jobs, req.tenant.supervisor_key);
         res.json(enriched);
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -290,19 +326,7 @@ router.get('/technician/:technicianId', requireAuth, async (req, res) => {
             ...tenantQuery(req.tenant.supervisor_key),
             'technicians.technician_id': req.params.technicianId
         }).sort({ createdAt: -1 }).limit(200);
-        const enriched = jobs.map((j) => {
-            const agg = calculateAggregatedProgress(j);
-            const obj = j.toObject();
-            const firstTech = (obj.technicians || [])[0];
-            return {
-                ...obj,
-                status: computeDerivedStatus(obj),
-                assigned_technician_id: firstTech?.technician_id,
-                assigned_technician_name: firstTech?.technician_name,
-                aggregated_progress_percentage: agg.overall,
-                progress_by_technician: agg.byTechnician
-            };
-        });
+        const enriched = await enrichJobsWithTimeLogProgress(jobs, req.tenant.supervisor_key);
         res.json(enriched);
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -317,17 +341,8 @@ router.get('/by-job/:jobNumber', requireAuth, async (req, res) => {
             job_number: req.params.jobNumber
         });
         if (!job) return res.status(404).json({ error: 'Job not found' });
-        const agg = calculateAggregatedProgress(job);
-        const obj = job.toObject();
-        const firstTech = (obj.technicians || [])[0];
-        res.json({
-            ...obj,
-            status: computeDerivedStatus(obj),
-            assigned_technician_id: firstTech?.technician_id,
-            assigned_technician_name: firstTech?.technician_name,
-            aggregated_progress_percentage: agg.overall,
-            progress_by_technician: agg.byTechnician
-        });
+        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        res.json(enriched[0]);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -382,16 +397,8 @@ router.post('/', requireSupervisor, async (req, res) => {
                 }
                 await existingJob.save();
 
-                const agg = calculateAggregatedProgress(existingJob);
-                const obj = existingJob.toObject();
-                const firstTech = (obj.technicians || [])[0];
-                return res.json({
-                    ...obj,
-                    assigned_technician_id: firstTech?.technician_id,
-                    assigned_technician_name: firstTech?.technician_name,
-                    aggregated_progress_percentage: agg.overall,
-                    progress_by_technician: agg.byTechnician
-                });
+                const enriched = await enrichJobsWithTimeLogProgress([existingJob], req.tenant.supervisor_key);
+                return res.json(enriched[0]);
             }
         }
 
@@ -444,16 +451,8 @@ router.put('/by-job/:jobNumber', requireAuth, async (req, res) => {
             { new: true }
         );
         if (!job) return res.status(404).json({ error: 'Job not found' });
-        const agg = calculateAggregatedProgress(job);
-        const obj = job.toObject();
-        const firstTech = (obj.technicians || [])[0];
-        res.json({
-            ...obj,
-            assigned_technician_id: firstTech?.technician_id,
-            assigned_technician_name: firstTech?.technician_name,
-            aggregated_progress_percentage: agg.overall,
-            progress_by_technician: agg.byTechnician
-        });
+        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        res.json(enriched[0]);
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -537,16 +536,8 @@ router.put('/:id', requireAuth, async (req, res) => {
 
         await job.save();
 
-        const agg = calculateAggregatedProgress(job);
-        const obj = job.toObject();
-        const firstTech = (obj.technicians || [])[0];
-        res.json({
-            ...obj,
-            assigned_technician_id: firstTech?.technician_id,
-            assigned_technician_name: firstTech?.technician_name,
-            aggregated_progress_percentage: agg.overall,
-            progress_by_technician: agg.byTechnician
-        });
+        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        res.json(enriched[0]);
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -649,32 +640,11 @@ router.delete('/by-job/:jobNumber/subtasks/:subtaskId', requireAuth, async (req,
 
 router.put('/by-job/:jobNumber/subtasks/:subtaskId/progress', requireAuth, async (req, res) => {
     try {
-        const { technician_id, progress_percentage } = req.body || {};
         const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: req.params.jobNumber });
         if (!job) return res.status(404).json({ error: 'Job not found' });
 
-        const st = job.subtasks.id(req.params.subtaskId);
-        if (!st) return res.status(404).json({ error: 'Subtask not found' });
-
-        const pct = Math.max(0, Math.min(100, Number(progress_percentage)));
-        const existing = (st.progress_by_technician || []).find((p) => p.technician_id && p.technician_id.toString() === technician_id);
-        if (existing) {
-            existing.progress_percentage = pct;
-            existing.updated_at = new Date();
-        } else {
-            st.progress_by_technician.push({ technician_id, progress_percentage: pct, updated_at: new Date() });
-        }
-
-        const agg = calculateAggregatedProgress(job);
-        job.progress_percentage = agg.overall;
-        await job.save();
-
-        const obj = job.toObject();
-        res.json({
-            ...obj,
-            aggregated_progress_percentage: agg.overall,
-            progress_by_technician: agg.byTechnician
-        });
+        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        res.json(enriched[0]);
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
