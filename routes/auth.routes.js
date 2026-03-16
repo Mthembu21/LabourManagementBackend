@@ -61,17 +61,37 @@ async function ensureSupervisorsSeeded() {
         {
             supervisor_key: 'component',
             email: 'given.theka@epiroc.com',
-            password: '123'
+            password: '123',
+            role: 'supervisor',
+            access: ['components']
         },
         {
             supervisor_key: 'rebuild',
             email: 'sibonele.moyo@epiroc.com',
-            password: '456'
+            password: '456',
+            role: 'supervisor',
+            access: ['rebuild']
         },
         {
             supervisor_key: 'pdis',
             email: 'leah.mcluskey@epiroc.com',
-            password: '789'
+            password: '789',
+            role: 'supervisor',
+            access: ['pdi']
+        },
+        {
+            supervisor_key: 'pdis',
+            email: 'john.vanderberg@epiroc.com',
+            password: '963',
+            role: 'foreman',
+            access: ['pdi', 'rebuild']
+        },
+        {
+            supervisor_key: 'component',
+            email: 'tsholofelo.moloto@epiroc.com',
+            password: '852',
+            role: 'manager',
+            access: ['components', 'pdi', 'rebuild', 'workshop_overview']
         }
     ];
 
@@ -86,6 +106,8 @@ async function ensureSupervisorsSeeded() {
         if (!existing) {
             await Supervisor.create({
                 supervisor_key: s.supervisor_key,
+                role: s.role || 'supervisor',
+                access: Array.isArray(s.access) ? s.access : [],
                 email: seedEmail,
                 password_hash
             });
@@ -100,6 +122,16 @@ async function ensureSupervisorsSeeded() {
         }
         if (existing.supervisor_key !== s.supervisor_key) {
             existing.supervisor_key = s.supervisor_key;
+            needsSave = true;
+        }
+        if ((existing.role || 'supervisor') !== (s.role || 'supervisor')) {
+            existing.role = s.role || 'supervisor';
+            needsSave = true;
+        }
+        const desiredAccess = Array.isArray(s.access) ? s.access : [];
+        const existingAccess = Array.isArray(existing.access) ? existing.access : [];
+        if (JSON.stringify(existingAccess) !== JSON.stringify(desiredAccess)) {
+            existing.access = desiredAccess;
             needsSave = true;
         }
         if (existing.password_hash !== password_hash) {
@@ -142,7 +174,9 @@ router.post('/supervisor/login', async (req, res) => {
             type: 'supervisor',
             id: supervisor._id.toString(),
             email: supervisor.email,
-            supervisor_key: supervisor.supervisor_key
+            supervisor_key: supervisor.supervisor_key,
+            role: supervisor.role || 'supervisor',
+            access: Array.isArray(supervisor.access) ? supervisor.access : []
         };
 
         res.json({ user: req.session.user });
@@ -157,6 +191,45 @@ router.get('/me', (req, res) => {
         return res.status(401).json({ error: 'Not authenticated' });
     }
     res.json({ user: req.session.user });
+});
+
+// Switch workshop tenant (for foreman/manager multi-access)
+router.post('/switch-tenant', async (req, res) => {
+    try {
+        if (!req.session.user) {
+            return res.status(401).json({ error: 'Not authenticated' });
+        }
+        if (req.session.user.type !== 'supervisor') {
+            return res.status(403).json({ error: 'Supervisor access required' });
+        }
+
+        const requested = String(req.body?.supervisor_key || '').trim();
+        if (!requested) {
+            return res.status(400).json({ error: 'supervisor_key is required' });
+        }
+
+        // Map requested tenant to access key
+        const tenantToAccess = {
+            component: 'components',
+            pdis: 'pdi',
+            rebuild: 'rebuild'
+        };
+        const needed = tenantToAccess[requested];
+        if (!needed) {
+            return res.status(400).json({ error: 'Invalid supervisor_key' });
+        }
+
+        const access = Array.isArray(req.session.user.access) ? req.session.user.access : [];
+        const hasAccess = access.includes(needed) || access.includes('workshop_overview');
+        if (!hasAccess) {
+            return res.status(403).json({ error: 'Not allowed to access this workshop' });
+        }
+
+        req.session.user.supervisor_key = requested;
+        res.json({ user: req.session.user });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // Logout

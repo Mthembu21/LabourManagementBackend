@@ -369,6 +369,7 @@ const jobRoutes = require("./routes/job.routes");
 const timeEntryRoutes = require("./routes/timeEntry.routes");
 const jobReportRoutes = require("./routes/jobReport.routes");
 const archiveRoutes = require("./routes/archive.routes");
+const overviewRoutes = require("./routes/overview.routes");
 
 const app = express();
 app.set("trust proxy", 1); // required for cookies behind Render proxy
@@ -432,6 +433,7 @@ app.use("/api/jobs", jobRoutes);
 app.use("/api/time-entries", timeEntryRoutes);
 app.use("/api/job-reports", jobReportRoutes);
 app.use("/api/archives", archiveRoutes);
+app.use("/api/overview", overviewRoutes);
 
 // Health check
 app.get("/api/health", (req, res) => {

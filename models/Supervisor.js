@@ -7,6 +7,17 @@ const supervisorSchema = new mongoose.Schema({
         enum: ['component', 'rebuild', 'pdis'],
         index: true
     },
+    role: {
+        type: String,
+        enum: ['supervisor', 'foreman', 'manager'],
+        default: 'supervisor',
+        index: true
+    },
+    access: {
+        type: [String],
+        default: [],
+        index: true
+    },
     email: {
         type: String,
         required: true,
