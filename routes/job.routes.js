@@ -236,10 +236,21 @@ router.put('/by-job/:jobNumber/confirm', requireAuth, async (req, res) => {
         const technicianId = req.body?.technician_id || req.session?.user?.id;
         if (!technicianId) return res.status(400).json({ error: 'technician_id is required' });
 
-        const job = await Job.findOne({
+        let job = await Job.findOne({
             ...tenantQuery(req.tenant.supervisor_key),
             job_number: req.params.jobNumber
         });
+
+        // Fallback for legacy jobs created before tenant isolation (no supervisor_key set)
+        if (!job && req.tenant?.supervisor_key && req.tenant.supervisor_key !== 'component') {
+            job = await Job.findOne({
+                job_number: req.params.jobNumber,
+                $or: [
+                    { supervisor_key: { $exists: false } },
+                    { supervisor_key: null }
+                ]
+            });
+        }
         if (!job) return res.status(404).json({ error: 'Job not found' });
 
         const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(technicianId));
