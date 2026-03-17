@@ -234,7 +234,7 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
 // Confirm/accept a job assignment for a technician (by Job ID)
 router.put('/by-job/:jobNumber/confirm', requireAuth, async (req, res) => {
     try {
-        const technicianId = req.body?.technician_id || req.session?.user?.id;
+        const technicianId = req.body?.technician_id || req.body?.technicianId || req.session?.user?.id;
         if (!technicianId) return res.status(400).json({ error: 'technician_id is required' });
 
         let job = await Job.findOne({
