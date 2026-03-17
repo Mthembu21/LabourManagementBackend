@@ -412,14 +412,17 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Session configuration
-const isProduction = process.env.NODE_ENV === "production";
+const useCrossSiteCookies =
+  process.env.CROSS_SITE_COOKIES === "true" ||
+  process.env.NODE_ENV === "production" ||
+  Boolean(process.env.RENDER);
 app.use(session({
   secret: process.env.SESSION_SECRET || "epiroc-workshop-secret",
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: isProduction,           // true in production (HTTPS)
-    sameSite: isProduction ? "none" : "lax", // allow cross-site cookies
+    secure: useCrossSiteCookies,           // must be true for SameSite=None
+    sameSite: useCrossSiteCookies ? "none" : "lax", // allow cross-site cookies
     httpOnly: true,
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
   }

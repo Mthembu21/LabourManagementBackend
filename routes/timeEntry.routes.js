@@ -4,6 +4,7 @@ const TimeLog = require('../models/TimeLog');
 const Job = require('../models/Job');
 const JobReport = require('../models/JobReport');
 const { requireAuth, tenantQuery } = require('../middleware/auth');
+const { getSouthAfricanHolidayInfo, normalizeDayOnly: normalizeHolidayDayOnly } = require('../lib/zaHolidays');
 
 const IDLE_JOB_ID = 'IDLE / NON-PRODUCTIVE';
 
@@ -80,15 +81,23 @@ router.get('/idle-categories', requireAuth, async (req, res) => {
 
 const getNormalLimitForDate = (dateObj) => {
     const dayIndex = dateObj.getDay();
+    const holiday = getSouthAfricanHolidayInfo(dateObj);
+    if (holiday.is_public_holiday) return 0; // Public holiday => all overtime
     if (dayIndex === 0 || dayIndex === 6) return 0; // Weekend => all overtime
     if (dayIndex === 5) return 7.5; // Friday (7h productive + 0.5h lunch)
     return 8.5; // Mon-Thu (8h productive + 0.5h lunch)
 };
 
-const normalizeDayOnly = (d) => {
-    const dt = new Date(d);
-    dt.setHours(0, 0, 0, 0);
-    return dt;
+const normalizeDayOnly = (d) => normalizeHolidayDayOnly(d);
+
+const getOvertimeMultiplierForDate = (dateObj) => {
+    const day = normalizeDayOnly(dateObj);
+    const holiday = getSouthAfricanHolidayInfo(day);
+    if (holiday.is_public_holiday) return 2;
+    const idx = day.getDay();
+    if (idx === 0) return 2; // Sunday
+    if (idx === 6) return 1.5; // Saturday
+    return 1;
 };
 
 const computeJobStatus = (jobDoc) => {
@@ -150,15 +159,35 @@ const reallocateDayNormalOvertime = async (technicianId, logDate) => {
     const normalLimit = getNormalLimitForDate(day);
     let normalRemaining = normalLimit;
 
+    const holidayInfo = getSouthAfricanHolidayInfo(day);
+    const multiplier = getOvertimeMultiplierForDate(day);
+    const isAllOvertime = multiplier > 1 || holidayInfo.is_public_holiday || normalLimit === 0;
+
     for (const l of logs) {
         const hrs = Number(l.hours_logged || 0);
-        const normal = Math.max(0, Math.min(hrs, normalRemaining));
+        const normal = isAllOvertime ? 0 : Math.max(0, Math.min(hrs, normalRemaining));
         const ot = Math.max(0, hrs - normal);
         normalRemaining = Math.max(0, normalRemaining - normal);
 
-        if (Number(l.normal_hours || 0) !== normal || Number(l.overtime_hours || 0) !== ot) {
+        const payable = multiplier > 1 ? (hrs * multiplier) : hrs;
+        const nextIsHoliday = Boolean(holidayInfo.is_public_holiday);
+        const nextHolidayName = holidayInfo.public_holiday_name;
+
+        const needsSave =
+            Number(l.normal_hours || 0) !== normal ||
+            Number(l.overtime_hours || 0) !== ot ||
+            Boolean(l.is_public_holiday) !== nextIsHoliday ||
+            (l.public_holiday_name || null) !== (nextHolidayName || null) ||
+            Number(l.overtime_multiplier || 1) !== multiplier ||
+            Number(l.payable_hours || 0) !== payable;
+
+        if (needsSave) {
             l.normal_hours = normal;
             l.overtime_hours = ot;
+            l.is_public_holiday = nextIsHoliday;
+            l.public_holiday_name = nextHolidayName || null;
+            l.overtime_multiplier = multiplier;
+            l.payable_hours = payable;
             await l.save();
         }
     }
@@ -394,7 +423,18 @@ router.post('/', requireAuth, async (req, res) => {
 
         await reallocateDayNormalOvertime(technicianId, logDate);
         
-        if (report && report.work_completed) {
+        if (report && (report.work_completed || report.has_bottleneck)) {
+            if (report.has_bottleneck && report.bottleneck_category === 'technical_complexity') {
+                const desc = String(report.bottleneck_description || '').trim();
+                const timeLost = Number(report.bottleneck_time_lost_hours);
+                if (!desc) {
+                    return res.status(400).json({ error: 'Technical Complexity requires a description of the issue' });
+                }
+                if (Number.isNaN(timeLost) || timeLost <= 0) {
+                    return res.status(400).json({ error: 'Technical Complexity requires time lost (hours) greater than 0' });
+                }
+            }
+
             const jobReport = new JobReport({
                 supervisor_key: req.tenant.supervisor_key,
                 ...report,
@@ -409,6 +449,14 @@ router.post('/', requireAuth, async (req, res) => {
                 });
                 if (job) {
                     job.bottleneck_count = (job.bottleneck_count || 0) + 1;
+
+                    if (report.bottleneck_category === 'technical_complexity') {
+                        const inc = Math.max(0, Number(report.bottleneck_time_lost_hours || 0));
+                        if (inc > 0) {
+                            job.technical_complexity_hours = Number(job.technical_complexity_hours || 0) + inc;
+                        }
+                    }
+
                     const allocated = Number(job.allocated_hours || 0);
                     const consumed = Number(job.consumed_hours || 0);
                     if (allocated > 0 && consumed > allocated) {
@@ -572,8 +620,8 @@ router.put('/:id', requireAuth, async (req, res) => {
 
             const otherStageLogs = await TimeLog.find({
                 ...tenantQuery(req.tenant.supervisor_key),
-                technician_id: existing.technician_id,
-                job_id: existing.job_id,
+        //  chnician_id/ivestite_hours/payibne_h.tec are derived server-sidenician_id,
+        // a d will b_ iecsmpttedgbyjreallocateDayNormalOb_id,
                 subtask_id: String(subtaskId),
                 is_idle: false,
                 _id: { $ne: existing._id }

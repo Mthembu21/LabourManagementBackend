@@ -69,6 +69,25 @@ const timeLogSchema = new mongoose.Schema({
         type: Number,
         default: 0,
         min: 0
+    },
+    is_public_holiday: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
+    public_holiday_name: {
+        type: String,
+        default: null
+    },
+    overtime_multiplier: {
+        type: Number,
+        default: 1,
+        min: 1
+    },
+    payable_hours: {
+        type: Number,
+        default: 0,
+        min: 0
     }
 }, {
     timestamps: true

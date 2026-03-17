@@ -107,6 +107,11 @@ const jobSchema = new mongoose.Schema({
         type: Number,
         required: true
     },
+    base_allocated_hours: {
+        type: Number,
+        default: null,
+        min: 0
+    },
     consumed_hours: {
         type: Number,
         default: 0
@@ -133,6 +138,16 @@ const jobSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    technical_complexity_hours: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    recovered_technical_complexity_hours: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
     start_date: Date,
     target_completion_date: Date,
     actual_completion_date: Date,
@@ -147,6 +162,16 @@ const jobSchema = new mongoose.Schema({
         to_technician_name: String,
         reassigned_date: String,
         reason: String
+    }],
+    audit_history: [{
+        actor_email: String,
+        actor_role: String,
+        at: {
+            type: Date,
+            default: Date.now
+        },
+        type: String,
+        details: mongoose.Schema.Types.Mixed
     }]
 }, {
     timestamps: true

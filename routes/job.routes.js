@@ -352,6 +352,72 @@ router.get('/by-job/:jobNumber', requireAuth, async (req, res) => {
     }
 });
 
+// Recover Technical Complexity hours (Option A)
+router.post('/by-job/:jobNumber/recover-technical-complexity', requireSupervisor, async (req, res) => {
+    try {
+        const job = await Job.findOne({
+            ...tenantQuery(req.tenant.supervisor_key),
+            job_number: req.params.jobNumber
+        });
+        if (!job) return res.status(404).json({ error: 'Job not found' });
+
+        const allocated = Number(job.allocated_hours || 0);
+        const consumed = Number(job.consumed_hours || 0);
+        const remaining = Number(job.remaining_hours ?? Math.max(0, allocated - consumed));
+
+        // Only allowed once allocated hours are fully consumed
+        if (remaining > 1e-9) {
+            return res.status(400).json({ error: 'Recovery is only available once allocated job hours are fully consumed' });
+        }
+
+        const totalTC = Number(job.technical_complexity_hours || 0);
+        const recoveredAlready = Number(job.recovered_technical_complexity_hours || 0);
+        const unrecovered = Math.max(0, totalTC - recoveredAlready);
+        if (unrecovered <= 1e-9) {
+            return res.status(400).json({ error: 'No unrecovered technical complexity hours available for this job' });
+        }
+
+        const prevAllocated = allocated;
+        if (job.base_allocated_hours === null || typeof job.base_allocated_hours === 'undefined') {
+            job.base_allocated_hours = prevAllocated;
+        }
+
+        const nextAllocated = prevAllocated + unrecovered;
+        job.allocated_hours = nextAllocated;
+        job.recovered_technical_complexity_hours = recoveredAlready + unrecovered;
+
+        // Recalculate derived job metrics
+        const nextRemaining = Math.max(0, nextAllocated - consumed);
+        const nextOverrun = Math.max(0, consumed - nextAllocated);
+        const nextProgress = nextAllocated > 0 ? (consumed / nextAllocated) * 100 : 0;
+        job.remaining_hours = nextRemaining;
+        job.overrun_hours = nextOverrun;
+        job.progress_percentage = Math.min(100, nextProgress);
+        job.status = computeDerivedStatus(job);
+
+        job.audit_history = Array.isArray(job.audit_history) ? job.audit_history : [];
+        job.audit_history.push({
+            actor_email: req.session.user?.email || '',
+            actor_role: req.session.user?.role || 'supervisor',
+            at: new Date(),
+            type: 'recovered_technical_complexity_hours',
+            details: {
+                added_hours: unrecovered,
+                prev_allocated_hours: prevAllocated,
+                next_allocated_hours: nextAllocated,
+                total_technical_complexity_hours: totalTC,
+                recovered_total_after: recoveredAlready + unrecovered
+            }
+        });
+
+        await job.save();
+        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        res.json(enriched[0]);
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
 // Create job
 router.post('/', requireSupervisor, async (req, res) => {
     try {
