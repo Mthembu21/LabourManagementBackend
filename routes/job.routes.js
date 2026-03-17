@@ -6,6 +6,7 @@ const TimeLog = require('../models/TimeLog');
 const DailyTimeEntry = require('../models/DailyTimeEntry');
 const JobReport = require('../models/JobReport');
 const { requireAuth, requireSupervisor, tenantQuery } = require('../middleware/auth');
+const mongoose = require('mongoose');
 
 const DEFAULT_SUBTASK_TITLES = ['Washing', 'Stripping', 'Assembling & Painting', 'Testing'];
 
@@ -240,6 +241,15 @@ router.put('/by-job/:jobNumber/confirm', requireAuth, async (req, res) => {
             ...tenantQuery(req.tenant.supervisor_key),
             job_number: req.params.jobNumber
         });
+
+        // Some legacy clients/data may pass a Mongo _id instead of job_number.
+        // If the param looks like an ObjectId, try resolving by _id as well.
+        if (!job && mongoose.Types.ObjectId.isValid(String(req.params.jobNumber))) {
+            job = await Job.findOne({
+                ...tenantQuery(req.tenant.supervisor_key),
+                _id: req.params.jobNumber
+            });
+        }
 
         // Fallback for legacy jobs created before tenant isolation (no supervisor_key set)
         if (!job && req.tenant?.supervisor_key && req.tenant.supervisor_key !== 'component') {
