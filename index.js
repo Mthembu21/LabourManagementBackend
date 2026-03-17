@@ -412,10 +412,15 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Session configuration
+const isRender = Boolean(
+  process.env.RENDER ||
+  process.env.RENDER_EXTERNAL_URL ||
+  process.env.RENDER_SERVICE_ID
+);
 const useCrossSiteCookies =
   process.env.CROSS_SITE_COOKIES === "true" ||
   process.env.NODE_ENV === "production" ||
-  Boolean(process.env.RENDER);
+  isRender;
 app.use(session({
   secret: process.env.SESSION_SECRET || "epiroc-workshop-secret",
   resave: false,
