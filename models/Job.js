@@ -163,16 +163,10 @@ const jobSchema = new mongoose.Schema({
         reassigned_date: String,
         reason: String
     }],
-    audit_history: [{
-        actor_email: String,
-        actor_role: String,
-        at: {
-            type: Date,
-            default: Date.now
-        },
-        type: String,
-        details: mongoose.Schema.Types.Mixed
-    }]
+    audit_history: {
+        type: mongoose.Schema.Types.Mixed,
+        default: []
+    }
 }, {
     timestamps: true
 });
