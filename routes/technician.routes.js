@@ -30,6 +30,32 @@ router.post('/', requireSupervisor, async (req, res) => {
     }
 });
 
+// Update technician
+router.put('/:id', requireSupervisor, async (req, res) => {
+    try {
+        const tech = await Technician.findOne({
+            ...tenantQuery(req.tenant.supervisor_key),
+            _id: req.params.id
+        });
+        if (!tech) return res.status(404).json({ error: 'Technician not found' });
+
+        const body = req.body || {};
+
+        if (typeof body.name === 'string') tech.name = body.name;
+        if (typeof body.employee_id === 'string') tech.employee_id = body.employee_id;
+        if (typeof body.department === 'string') tech.department = body.department;
+        if (typeof body.status === 'string') tech.status = body.status;
+
+        await tech.save();
+        res.json(tech);
+    } catch (error) {
+        if (error && error.code === 11000) {
+            return res.status(409).json({ error: 'employee_id already exists' });
+        }
+        res.status(400).json({ error: error.message });
+    }
+});
+
 // Delete technician (and their time entries)
 router.delete('/:id', requireSupervisor, async (req, res) => {
     try {

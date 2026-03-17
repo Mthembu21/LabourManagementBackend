@@ -3,6 +3,8 @@ const router = express.Router();
 const Job = require('../models/Job');
 const Technician = require('../models/Technician');
 const TimeLog = require('../models/TimeLog');
+const DailyTimeEntry = require('../models/DailyTimeEntry');
+const JobReport = require('../models/JobReport');
 const { requireAuth, requireSupervisor, tenantQuery } = require('../middleware/auth');
 
 const DEFAULT_SUBTASK_TITLES = ['Washing', 'Stripping', 'Assembling & Painting', 'Testing'];
@@ -137,6 +139,7 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
     ]);
 
     const consumedByJob = new Map();
+    const consumedByJobSubtask = new Map();
     const consumedByJobSubtaskTech = new Map();
     const consumedByJobTech = new Map();
 
@@ -150,6 +153,7 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
         const key = `${jobId}:${subtaskId}:${techId}`;
         consumedByJobSubtaskTech.set(key, hrs);
         consumedByJob.set(jobId, (consumedByJob.get(jobId) || 0) + hrs);
+        consumedByJobSubtask.set(`${jobId}:${subtaskId}`, (consumedByJobSubtask.get(`${jobId}:${subtaskId}`) || 0) + hrs);
         consumedByJobTech.set(`${jobId}:${techId}`, (consumedByJobTech.get(`${jobId}:${techId}`) || 0) + hrs);
     }
 
@@ -185,6 +189,11 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
             const subtaskAllocated = Number(st?.allocated_hours || 0);
             const allocatedHours = subtaskAllocated > 0 ? subtaskAllocated : jobAllocated;
 
+            const subtaskConsumed = subtaskId
+                ? (consumedByJobSubtask.get(`${String(obj.job_number)}:${subtaskId}`) || 0)
+                : 0;
+            const subtaskRemaining = Math.max(0, allocatedHours - subtaskConsumed);
+
             const assigned = Array.isArray(st?.assigned_technicians) ? st.assigned_technicians : [];
             const nextProgress = assigned.map((a) => {
                 const techId = String(a?.technician_id || '');
@@ -203,6 +212,8 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
 
             return {
                 ...st,
+                consumed_hours: subtaskConsumed,
+                remaining_hours: subtaskRemaining,
                 progress_by_technician: nextProgress
             };
         });
@@ -240,6 +251,18 @@ router.put('/by-job/:jobNumber/confirm', requireAuth, async (req, res) => {
         if (job.status === 'pending_confirmation') {
             job.status = 'active';
         }
+
+        job.audit_history = Array.isArray(job.audit_history) ? job.audit_history : [];
+        job.audit_history.push({
+            actor_email: req.session.user?.email || '',
+            actor_role: req.session.user?.role || 'supervisor',
+            at: new Date(),
+            type: 'technician_confirmed_job',
+            details: {
+                technician_id: String(technicianId),
+                job_number: String(job.job_number)
+            }
+        });
 
         await job.save();
 
@@ -513,14 +536,122 @@ router.post('/', requireSupervisor, async (req, res) => {
 });
 
 // Update a job by Job ID (job_number)
-router.put('/by-job/:jobNumber', requireAuth, async (req, res) => {
+router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
     try {
-        const job = await Job.findOneAndUpdate(
-            { ...tenantQuery(req.tenant.supervisor_key), job_number: req.params.jobNumber },
-            req.body,
-            { new: true }
-        );
+        const job = await Job.findOne({
+            ...tenantQuery(req.tenant.supervisor_key),
+            job_number: req.params.jobNumber
+        });
         if (!job) return res.status(404).json({ error: 'Job not found' });
+
+        const body = req.body || {};
+        const prevSnapshot = {
+            job_number: job.job_number,
+            description: job.description,
+            allocated_hours: job.allocated_hours,
+            status: job.status,
+            technicians: job.technicians,
+            start_date: job.start_date,
+            target_completion_date: job.target_completion_date,
+            subtasks: job.subtasks
+        };
+
+        const prevJobNumber = String(job.job_number);
+        const nextJobNumber = typeof body.job_number === 'string' ? body.job_number.trim() : prevJobNumber;
+        if (!nextJobNumber) return res.status(400).json({ error: 'job_number is required' });
+
+        if (nextJobNumber !== prevJobNumber) {
+            const exists = await Job.findOne({
+                ...tenantQuery(req.tenant.supervisor_key),
+                job_number: nextJobNumber
+            });
+            if (exists) return res.status(409).json({ error: 'Job number already exists' });
+            job.job_number = nextJobNumber;
+        }
+
+        if (typeof body.description === 'string') job.description = body.description;
+        if (typeof body.status === 'string') job.status = body.status;
+        if (Object.prototype.hasOwnProperty.call(body, 'start_date')) job.start_date = body.start_date ? new Date(body.start_date) : null;
+        if (Object.prototype.hasOwnProperty.call(body, 'target_completion_date')) job.target_completion_date = body.target_completion_date ? new Date(body.target_completion_date) : null;
+
+        if (Object.prototype.hasOwnProperty.call(body, 'technicians') && Array.isArray(body.technicians)) {
+            job.technicians = body.technicians
+                .filter((t) => t && t.technician_id)
+                .map((t) => ({
+                    technician_id: t.technician_id,
+                    technician_name: t.technician_name || '',
+                    confirmed_by_technician: !!t.confirmed_by_technician,
+                    confirmed_date: t.confirmed_date ? new Date(t.confirmed_date) : null,
+                    consumed_hours: Number(t.consumed_hours || 0)
+                }))
+                .filter((t) => t.technician_name);
+        }
+
+        const prevAllocated = Number(job.allocated_hours || 0);
+        if (Object.prototype.hasOwnProperty.call(body, 'allocated_hours')) {
+            const nextAllocated = Number(body.allocated_hours || 0);
+            if (!Number.isNaN(nextAllocated) && nextAllocated >= 0) {
+                if (job.base_allocated_hours === null || typeof job.base_allocated_hours === 'undefined') {
+                    job.base_allocated_hours = prevAllocated;
+                }
+                job.allocated_hours = nextAllocated;
+
+                const consumed = Number(job.consumed_hours || 0);
+                job.remaining_hours = Math.max(0, nextAllocated - consumed);
+                job.overrun_hours = Math.max(0, consumed - nextAllocated);
+                job.progress_percentage = Math.min(100, nextAllocated > 0 ? (consumed / nextAllocated) * 100 : 0);
+            }
+        }
+
+        if (Object.prototype.hasOwnProperty.call(body, 'subtasks')) {
+            job.subtasks = normalizeSubtasksInput(body.subtasks);
+        }
+
+        const totalSubtaskAllocated = (job.subtasks || []).reduce((sum, st) => sum + Number(st.allocated_hours || 0), 0);
+        const jobAllocated = Number(job.allocated_hours || 0);
+        if (Number.isFinite(jobAllocated) && jobAllocated > 0 && totalSubtaskAllocated > jobAllocated) {
+            return res.status(400).json({ error: 'Sum of subtask allocated hours cannot exceed job allocated hours' });
+        }
+
+        job.audit_history = Array.isArray(job.audit_history) ? job.audit_history : [];
+        job.audit_history.push({
+            actor_email: req.session.user?.email || '',
+            actor_role: req.session.user?.role || 'supervisor',
+            at: new Date(),
+            type: 'job_updated',
+            details: {
+                previous: prevSnapshot,
+                next: {
+                    job_number: job.job_number,
+                    description: job.description,
+                    allocated_hours: job.allocated_hours,
+                    status: job.status,
+                    technicians: job.technicians,
+                    start_date: job.start_date,
+                    target_completion_date: job.target_completion_date,
+                    subtasks: job.subtasks
+                }
+            }
+        });
+
+        await job.save();
+
+        if (nextJobNumber !== prevJobNumber) {
+            const tenantFilter = tenantQuery(req.tenant.supervisor_key);
+            await TimeLog.updateMany(
+                { ...tenantFilter, job_id: prevJobNumber },
+                { $set: { job_id: nextJobNumber } }
+            );
+            await DailyTimeEntry.updateMany(
+                { ...tenantFilter, job_id: prevJobNumber },
+                { $set: { job_id: nextJobNumber, job_number: nextJobNumber } }
+            );
+            await JobReport.updateMany(
+                { ...tenantFilter, job_id: prevJobNumber },
+                { $set: { job_id: nextJobNumber, job_number: nextJobNumber } }
+            );
+        }
+
         const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
         res.json(enriched[0]);
     } catch (error) {
@@ -529,7 +660,7 @@ router.put('/by-job/:jobNumber', requireAuth, async (req, res) => {
 });
 
 // Update job (legacy endpoint, supports old fields)
-router.put('/:id', requireAuth, async (req, res) => {
+router.put('/:id', requireSupervisor, async (req, res) => {
     try {
         const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id });
         if (!job) return res.status(404).json({ error: 'Job not found' });
@@ -613,7 +744,7 @@ router.put('/:id', requireAuth, async (req, res) => {
     }
 });
 
-router.post('/by-job/:jobNumber/subtasks', requireAuth, async (req, res) => {
+router.post('/by-job/:jobNumber/subtasks', requireSupervisor, async (req, res) => {
     try {
         const { title, weight, allocated_hours, assigned_technicians } = req.body || {};
         const job = await Job.findOne({ job_number: req.params.jobNumber });
@@ -653,7 +784,7 @@ router.post('/by-job/:jobNumber/subtasks', requireAuth, async (req, res) => {
     }
 });
 
-router.put('/by-job/:jobNumber/subtasks/:subtaskId', requireAuth, async (req, res) => {
+router.put('/by-job/:jobNumber/subtasks/:subtaskId', requireSupervisor, async (req, res) => {
     try {
         const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: req.params.jobNumber });
         if (!job) return res.status(404).json({ error: 'Job not found' });
@@ -693,7 +824,7 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId', requireAuth, async (req, re
     }
 });
 
-router.delete('/by-job/:jobNumber/subtasks/:subtaskId', requireAuth, async (req, res) => {
+router.delete('/by-job/:jobNumber/subtasks/:subtaskId', requireSupervisor, async (req, res) => {
     try {
         const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: req.params.jobNumber });
         if (!job) return res.status(404).json({ error: 'Job not found' });
