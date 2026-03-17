@@ -273,8 +273,7 @@ router.put('/by-job/:jobNumber/confirm', requireAuth, async (req, res) => {
             job.status = 'active';
         }
 
-        job.audit_history = Array.isArray(job.audit_history) ? job.audit_history : [];
-        job.audit_history.push({
+        const auditEntry = {
             actor_email: req.session.user?.email || '',
             actor_role: req.session.user?.role || 'supervisor',
             at: new Date(),
@@ -283,7 +282,17 @@ router.put('/by-job/:jobNumber/confirm', requireAuth, async (req, res) => {
                 technician_id: String(technicianId),
                 job_number: String(job.job_number)
             }
-        });
+        };
+
+        // Backward compatibility: some environments previously stored audit_history as a string.
+        if (Array.isArray(job.audit_history)) {
+            job.audit_history.push(auditEntry);
+        } else if (typeof job.audit_history === 'string') {
+            const line = JSON.stringify(auditEntry);
+            job.audit_history = job.audit_history ? `${job.audit_history}\n${line}` : line;
+        } else {
+            job.audit_history = [auditEntry];
+        }
 
         await job.save();
 
