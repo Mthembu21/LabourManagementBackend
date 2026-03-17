@@ -88,6 +88,30 @@ const timeLogSchema = new mongoose.Schema({
         type: Number,
         default: 0,
         min: 0
+    },
+
+    approval_status: {
+        type: String,
+        enum: ['pending', 'approved', 'declined'],
+        default: 'approved',
+        index: true
+    },
+    approved_hours: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    approved_by: {
+        type: String,
+        default: null
+    },
+    approved_at: {
+        type: Date,
+        default: null
+    },
+    approval_note: {
+        type: String,
+        default: ''
     }
 }, {
     timestamps: true

@@ -3,18 +3,215 @@ const router = express.Router();
 const TimeLog = require('../models/TimeLog');
 const Job = require('../models/Job');
 const JobReport = require('../models/JobReport');
-const { requireAuth, tenantQuery } = require('../middleware/auth');
+const { requireAuth, requireSupervisor, tenantQuery } = require('../middleware/auth');
 const { getSouthAfricanHolidayInfo, normalizeDayOnly: normalizeHolidayDayOnly } = require('../lib/zaHolidays');
 
 const IDLE_JOB_ID = 'IDLE / NON-PRODUCTIVE';
 
+const requireForemanOrManager = (req, res) => {
+    if (!req.session?.user || req.session.user.type !== 'supervisor') {
+        return res.status(403).json({ error: 'Supervisor access required' });
+    }
+    const role = req.session.user.role || 'supervisor';
+    if (!['foreman', 'manager'].includes(role)) {
+        return res.status(403).json({ error: 'Foreman access required' });
+    }
+    return null;
+};
+
+const sumSubmittedJobHours = async ({ supervisorKey, jobId }) => {
+    if (!jobId || jobId === IDLE_JOB_ID) return 0;
+    const logs = await TimeLog.find({
+        ...tenantQuery(supervisorKey),
+        is_idle: false,
+        job_id: String(jobId)
+    });
+    return logs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+};
+
+const requiresApprovalForTenant = (supervisorKey) => {
+    return supervisorKey === 'pdis' || supervisorKey === 'rebuild';
+};
+
 const requireSelfOrSupervisor = (req, res, technicianId) => {
     const user = req.session?.user;
     if (!user) return res.status(401).json({ error: 'Authentication required' });
+
     if (user.type === 'supervisor') return null;
     if (user.type === 'technician' && String(user.id) === String(technicianId)) return null;
     return res.status(403).json({ error: 'Not allowed' });
 };
+
+const sumApprovedStageHours = async ({ supervisorKey, jobId, subtaskId, technicianId }) => {
+    if (!jobId || !subtaskId || !technicianId) return 0;
+    const logs = await TimeLog.find({
+        ...tenantQuery(supervisorKey),
+        is_idle: false,
+        job_id: String(jobId),
+        subtask_id: String(subtaskId),
+        technician_id: technicianId
+    });
+    return logs.reduce((sum, e) => sum + Number(e.approved_hours || 0), 0);
+};
+
+const updateJobForApprovedDelta = async ({ supervisorKey, jobId, subtaskId, technicianId, deltaApproved }) => {
+    if (!deltaApproved || Math.abs(Number(deltaApproved || 0)) <= 1e-9) return;
+    if (!jobId || jobId === IDLE_JOB_ID) return;
+
+    const job = await Job.findOne({ ...tenantQuery(supervisorKey), job_number: String(jobId) });
+    if (!job) return;
+
+    job.consumed_hours = Math.max(0, Number(job.consumed_hours || 0) + Number(deltaApproved || 0));
+    const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(technicianId));
+    if (tech) {
+        tech.consumed_hours = Math.max(0, Number(tech.consumed_hours || 0) + Number(deltaApproved || 0));
+    }
+
+    if (subtaskId) {
+        const allocation = getSubtaskAllocationForTechnician(job, subtaskId, technicianId);
+        const allocHours = Number(allocation?.allocated_hours || 0);
+        if (allocHours > 0) {
+            const stageSum = await sumApprovedStageHours({ supervisorKey, jobId, subtaskId, technicianId });
+            upsertSubtaskProgressForTechnician(job, subtaskId, technicianId, (stageSum / allocHours) * 100);
+        }
+    }
+
+    const newConsumed = Number(job.consumed_hours || 0);
+    const allocated = Number(job.allocated_hours || 0);
+    const overrunHours = Math.max(0, newConsumed - allocated);
+    const progress = allocated > 0 ? (newConsumed / allocated) * 100 : 0;
+    const remaining = Math.max(0, allocated - newConsumed);
+
+    job.remaining_hours = remaining;
+    job.overrun_hours = overrunHours;
+    job.progress_percentage = Math.min(100, progress);
+    job.status = computeJobStatus(job);
+
+    await job.save();
+};
+
+// List time logs pending approval (Foreman/Manager only)
+router.get('/approvals/pending', requireSupervisor, async (req, res) => {
+    try {
+        const deny = requireForemanOrManager(req, res);
+        if (deny) return;
+
+        if (!requiresApprovalForTenant(req.tenant.supervisor_key)) {
+            return res.json([]);
+        }
+
+        const query = {
+            ...tenantQuery(req.tenant.supervisor_key),
+            approval_status: 'pending'
+        };
+
+        const { start_date, end_date, technician_id } = req.query;
+        if (technician_id) query.technician_id = technician_id;
+        if (start_date || end_date) {
+            const start = start_date ? new Date(start_date) : null;
+            const end = end_date ? new Date(end_date) : null;
+            query.log_date = {};
+            if (start && !Number.isNaN(start.getTime())) {
+                start.setHours(0, 0, 0, 0);
+                query.log_date.$gte = start;
+            }
+            if (end && !Number.isNaN(end.getTime())) {
+                end.setHours(23, 59, 59, 999);
+                query.log_date.$lte = end;
+            }
+            if (!Object.keys(query.log_date).length) delete query.log_date;
+        }
+
+        const logs = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(500);
+        res.json(logs);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Approve a time log (partial approval supported)
+router.put('/:id/approve', requireSupervisor, async (req, res) => {
+    try {
+        const deny = requireForemanOrManager(req, res);
+        if (deny) return;
+
+        if (!requiresApprovalForTenant(req.tenant.supervisor_key)) {
+            return res.status(400).json({ error: 'Approval workflow is not enabled for this workshop' });
+        }
+
+        const entry = await TimeLog.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id });
+        if (!entry) return res.status(404).json({ error: 'Time log not found' });
+
+        const submitted = Number(entry.hours_logged || 0);
+        const desired = Number(req.body?.approved_hours);
+        if (Number.isNaN(desired) || desired < 0) {
+            return res.status(400).json({ error: 'approved_hours must be a number >= 0' });
+        }
+        if (desired > submitted + 1e-9) {
+            return res.status(400).json({ error: 'approved_hours cannot exceed submitted hours' });
+        }
+
+        const prevApproved = Number(entry.approved_hours || 0);
+        const nextApproved = Math.max(0, Math.min(submitted, desired));
+        const deltaApproved = nextApproved - prevApproved;
+
+        entry.approval_status = 'approved';
+        entry.approved_hours = nextApproved;
+        entry.approved_by = req.session.user?.email || null;
+        entry.approved_at = new Date();
+        entry.approval_note = typeof req.body?.note === 'string' ? req.body.note : (entry.approval_note || '');
+        await entry.save();
+
+        await updateJobForApprovedDelta({
+            supervisorKey: req.tenant.supervisor_key,
+            jobId: entry.job_id,
+            subtaskId: entry.subtask_id,
+            technicianId: entry.technician_id,
+            deltaApproved
+        });
+
+        res.json(entry);
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
+// Decline a time log (approved hours become 0)
+router.put('/:id/decline', requireSupervisor, async (req, res) => {
+    try {
+        const deny = requireForemanOrManager(req, res);
+        if (deny) return;
+
+        if (!requiresApprovalForTenant(req.tenant.supervisor_key)) {
+            return res.status(400).json({ error: 'Approval workflow is not enabled for this workshop' });
+        }
+
+        const entry = await TimeLog.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id });
+        if (!entry) return res.status(404).json({ error: 'Time log not found' });
+
+        const prevApproved = Number(entry.approved_hours || 0);
+        const deltaApproved = 0 - prevApproved;
+
+        entry.approval_status = 'declined';
+        entry.approved_hours = 0;
+        entry.approved_by = req.session.user?.email || null;
+        entry.approved_at = new Date();
+        entry.approval_note = typeof req.body?.note === 'string' ? req.body.note : (entry.approval_note || '');
+        await entry.save();
+
+        await updateJobForApprovedDelta({
+            supervisorKey: req.tenant.supervisor_key,
+            jobId: entry.job_id,
+            subtaskId: entry.subtask_id,
+            technicianId: entry.technician_id,
+            deltaApproved
+        });
+
+        res.json(entry);
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
 
 const isJobFullyCompleteByAssignments = (jobDoc) => {
     if (!jobDoc) return false;
@@ -370,7 +567,11 @@ router.post('/', requireAuth, async (req, res) => {
                 // Allow logging past target date; job will be considered at-risk.
             }
 
-            const remaining = Math.max(0, (Number(jobForCheck.allocated_hours || 0) - Number(jobForCheck.consumed_hours || 0)));
+            const allocatedForJob = Number(jobForCheck.allocated_hours || 0);
+            const consumedForJob = requiresApprovalForTenant(req.tenant.supervisor_key)
+                ? await sumSubmittedJobHours({ supervisorKey: req.tenant.supervisor_key, jobId })
+                : Number(jobForCheck.consumed_hours || 0);
+            const remaining = Math.max(0, allocatedForJob - consumedForJob);
             if (deltaHours > remaining) {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job' });
             }
@@ -394,6 +595,9 @@ router.post('/', requireAuth, async (req, res) => {
             }
         }
 
+        const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
+        const defaultStatus = needsApproval ? 'pending' : 'approved';
+
         let entry;
         if (existingSameJob) {
             existingSameJob.hours_logged = prevHoursForSameJob + hoursLogged;
@@ -402,6 +606,17 @@ router.post('/', requireAuth, async (req, res) => {
             existingSameJob.category_detail = isIdle ? String(categoryDetail || '') : '';
             existingSameJob.subtask_id = isIdle ? null : String(subtaskId);
             existingSameJob.subtask_title = isIdle ? null : resolvedSubtaskTitle;
+
+            // Approval defaults:
+            // - Component: auto-approved at hours_logged
+            // - PDI/Rebuild: pending (approved hours start at 0)
+            if (!needsApproval) {
+                existingSameJob.approval_status = 'approved';
+                existingSameJob.approved_hours = Number(existingSameJob.hours_logged || 0);
+            } else {
+                existingSameJob.approval_status = 'pending';
+                existingSameJob.approved_hours = Number(existingSameJob.approved_hours || 0);
+            }
             entry = await existingSameJob.save();
         } else {
             entry = new TimeLog({
@@ -416,7 +631,12 @@ router.post('/', requireAuth, async (req, res) => {
                 category_detail: isIdle ? String(categoryDetail || '') : '',
                 is_idle: isIdle,
                 normal_hours: 0,
-                overtime_hours: 0
+                overtime_hours: 0,
+                approval_status: defaultStatus,
+                approved_hours: defaultStatus === 'approved' ? hoursLogged : 0,
+                approved_by: null,
+                approved_at: null,
+                approval_note: ''
             });
             await entry.save();
         }
@@ -474,10 +694,12 @@ router.post('/', requireAuth, async (req, res) => {
         if (!isIdle) {
             const job = jobForCheck || await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: jobId });
             if (job) {
-                job.consumed_hours = Number(job.consumed_hours || 0) + deltaHours;
+                // For approval tenants (PDI/Rebuild), do NOT apply submitted hours to job until approved.
+                const deltaApproved = needsApproval ? 0 : deltaHours;
+                job.consumed_hours = Number(job.consumed_hours || 0) + deltaApproved;
                 const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(technicianId));
                 if (tech) {
-                    tech.consumed_hours = Number(tech.consumed_hours || 0) + deltaHours;
+                    tech.consumed_hours = Number(tech.consumed_hours || 0) + deltaApproved;
                 }
 
                 // Auto-update subtask progress for this technician based on allocated stage hours
@@ -486,18 +708,20 @@ router.post('/', requireAuth, async (req, res) => {
                     const allocation = getSubtaskAllocationForTechnician(job, subtaskId, technicianId);
                     const allocHours = Number(allocation?.allocated_hours || 0);
                     if (allocHours > 0) {
-                        const existingStageLogs = await TimeLog.find({
-                            ...tenantQuery(req.tenant.supervisor_key),
-                            technician_id: technicianId,
-                            job_id: jobId,
-                            subtask_id: String(subtaskId),
-                            is_idle: false
-                        });
-                        alreadyLoggedStageHours = existingStageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+                        if (!needsApproval) {
+                            const existingStageLogs = await TimeLog.find({
+                                ...tenantQuery(req.tenant.supervisor_key),
+                                technician_id: technicianId,
+                                job_id: jobId,
+                                subtask_id: String(subtaskId),
+                                is_idle: false
+                            });
+                            alreadyLoggedStageHours = existingStageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
 
-                        const newStageHours = alreadyLoggedStageHours + hoursLogged;
-                        const pct = (newStageHours / allocHours) * 100;
-                        upsertSubtaskProgressForTechnician(job, subtaskId, technicianId, pct);
+                            const newStageHours = alreadyLoggedStageHours + hoursLogged;
+                            const pct = (newStageHours / allocHours) * 100;
+                            upsertSubtaskProgressForTechnician(job, subtaskId, technicianId, pct);
+                        }
                     }
                 }
 
@@ -578,6 +802,8 @@ router.put('/:id', requireAuth, async (req, res) => {
         if (deny) return;
         const payload = req.body?.timeLog || req.body || {};
 
+        const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
+
         const newHours = Number(payload?.hours_logged);
         const newCategory = payload?.category ?? null;
         const isIdle = typeof payload?.is_idle !== 'undefined' ? !!payload.is_idle : !!existing.is_idle;
@@ -631,7 +857,11 @@ router.put('/:id', requireAuth, async (req, res) => {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job stage' });
             }
 
-            const remainingJob = Math.max(0, (Number(jobForCheck.allocated_hours || 0) - Number(jobForCheck.consumed_hours || 0)));
+            const allocatedForJob = Number(jobForCheck.allocated_hours || 0);
+            const consumedForJob = needsApproval
+                ? await sumSubmittedJobHours({ supervisorKey: req.tenant.supervisor_key, jobId: existing.job_id })
+                : Number(jobForCheck.consumed_hours || 0);
+            const remainingJob = Math.max(0, allocatedForJob - consumedForJob);
             const delta = newHours - Number(existing.hours_logged || 0);
             if (delta > remainingJob) {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job' });
@@ -645,54 +875,83 @@ router.put('/:id', requireAuth, async (req, res) => {
         const overtimeHours = Math.max(0, newHours - normalHours);
 
         const prevHours = Number(existing.hours_logged || 0);
+        const prevApproved = Number(existing.approved_hours || 0);
         existing.hours_logged = newHours;
         existing.is_idle = isIdle;
         existing.category = isIdle ? newCategory : null;
         existing.subtask_id = isIdle ? null : String(subtaskId);
         existing.normal_hours = normalHours;
         existing.overtime_hours = overtimeHours;
+
+        // Approval behavior:
+        // - Component: always keep logs approved and approved_hours == hours_logged
+        // - PDI/Rebuild: if an approved log is edited, it must be re-approved (reset to pending)
+        if (!needsApproval) {
+            existing.approval_status = 'approved';
+            existing.approved_hours = newHours;
+        } else {
+            if (existing.approval_status === 'approved' && prevApproved > 0) {
+                // reverse previously approved hours from job totals
+                await updateJobForApprovedDelta({
+                    supervisorKey: req.tenant.supervisor_key,
+                    jobId: existing.job_id,
+                    subtaskId: existing.subtask_id,
+                    technicianId: existing.technician_id,
+                    deltaApproved: -prevApproved
+                });
+            }
+
+            existing.approval_status = 'pending';
+            existing.approved_hours = 0;
+            existing.approved_by = null;
+            existing.approved_at = null;
+        }
         await existing.save();
 
         await reallocateDayNormalOvertime(existing.technician_id, logDate);
 
         if (!existing.is_idle) {
-            const delta = newHours - prevHours;
-            const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: existing.job_id });
-            if (job) {
-                job.consumed_hours = Number(job.consumed_hours || 0) + delta;
-                const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(existing.technician_id));
-                if (tech) {
-                    tech.consumed_hours = Number(tech.consumed_hours || 0) + delta;
-                }
-
-                const stId = existing.subtask_id;
-                if (stId) {
-                    const allocation = getSubtaskAllocationForTechnician(job, stId, existing.technician_id);
-                    const allocHours = Number(allocation?.allocated_hours || 0);
-                    if (allocHours > 0) {
-                        const stageLogs = await TimeLog.find({
-                            ...tenantQuery(req.tenant.supervisor_key),
-                            technician_id: existing.technician_id,
-                            job_id: existing.job_id,
-                            subtask_id: String(stId),
-                            is_idle: false
-                        });
-                        const stageSum = stageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
-                        upsertSubtaskProgressForTechnician(job, stId, existing.technician_id, (stageSum / allocHours) * 100);
+            // Only Component affects job totals during technician edits.
+            // Approval tenants update job totals only on foreman approve/decline.
+            if (!needsApproval) {
+                const delta = newHours - prevHours;
+                const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: existing.job_id });
+                if (job) {
+                    job.consumed_hours = Number(job.consumed_hours || 0) + delta;
+                    const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(existing.technician_id));
+                    if (tech) {
+                        tech.consumed_hours = Number(tech.consumed_hours || 0) + delta;
                     }
+
+                    const stId = existing.subtask_id;
+                    if (stId) {
+                        const allocation = getSubtaskAllocationForTechnician(job, stId, existing.technician_id);
+                        const allocHours = Number(allocation?.allocated_hours || 0);
+                        if (allocHours > 0) {
+                            const stageLogs = await TimeLog.find({
+                                ...tenantQuery(req.tenant.supervisor_key),
+                                technician_id: existing.technician_id,
+                                job_id: existing.job_id,
+                                subtask_id: String(stId),
+                                is_idle: false
+                            });
+                            const stageSum = stageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+                            upsertSubtaskProgressForTechnician(job, stId, existing.technician_id, (stageSum / allocHours) * 100);
+                        }
+                    }
+
+                    const newConsumed = Number(job.consumed_hours || 0);
+                    const allocated = Number(job.allocated_hours || 0);
+                    const remaining = Math.max(0, allocated - newConsumed);
+                    const overrunHours = Math.max(0, newConsumed - allocated);
+                    const progress = allocated > 0 ? (newConsumed / allocated) * 100 : 0;
+
+                    job.remaining_hours = remaining;
+                    job.overrun_hours = overrunHours;
+                    job.progress_percentage = Math.min(100, progress);
+                    job.status = computeJobStatus(job);
+                    await job.save();
                 }
-
-                const newConsumed = Number(job.consumed_hours || 0);
-                const allocated = Number(job.allocated_hours || 0);
-                const remaining = Math.max(0, allocated - newConsumed);
-                const overrunHours = Math.max(0, newConsumed - allocated);
-                const progress = allocated > 0 ? (newConsumed / allocated) * 100 : 0;
-
-                job.remaining_hours = remaining;
-                job.overrun_hours = overrunHours;
-                job.progress_percentage = Math.min(100, progress);
-                job.status = computeJobStatus(job);
-                await job.save();
             }
         }
 
@@ -710,7 +969,8 @@ router.delete('/:id', requireAuth, async (req, res) => {
         const deny = requireSelfOrSupervisor(req, res, existing.technician_id);
         if (deny) return;
 
-        const hours = Number(existing.hours_logged || 0);
+        const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
+        const hours = !needsApproval ? Number(existing.hours_logged || 0) : Number(existing.approved_hours || 0);
         const jobId = existing.job_id;
         const technicianId = existing.technician_id;
         const isIdle = !!existing.is_idle;
@@ -738,7 +998,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
                             subtask_id: String(subtaskId),
                             is_idle: false
                         });
-                        const stageSum = stageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+                        const stageSum = stageLogs.reduce((sum, e) => sum + (!needsApproval ? Number(e.hours_logged || 0) : Number(e.approved_hours || 0)), 0);
                         upsertSubtaskProgressForTechnician(job, subtaskId, technicianId, (stageSum / allocHours) * 100);
                     }
                 }
