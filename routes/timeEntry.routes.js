@@ -3,6 +3,7 @@ const router = express.Router();
 const TimeLog = require('../models/TimeLog');
 const Job = require('../models/Job');
 const JobReport = require('../models/JobReport');
+const Technician = require('../models/Technician');
 const { requireAuth, requireSupervisor, tenantQuery } = require('../middleware/auth');
 const { getSouthAfricanHolidayInfo, normalizeDayOnly: normalizeHolidayDayOnly } = require('../lib/zaHolidays');
 
@@ -123,7 +124,38 @@ router.get('/approvals/pending', requireSupervisor, async (req, res) => {
         }
 
         const logs = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(500);
-        res.json(logs);
+
+        // Enrich missing technician names for display in foreman approvals UI
+        const missingNameIds = Array.from(
+            new Set(
+                (logs || [])
+                    .filter((l) => l && l.technician_id && !l.technician_name)
+                    .map((l) => String(l.technician_id))
+            )
+        );
+
+        let nameById = {};
+        if (missingNameIds.length) {
+            const techs = await Technician.find({
+                ...tenantQuery(req.tenant.supervisor_key),
+                _id: { $in: missingNameIds }
+            }).select({ _id: 1, name: 1 });
+            nameById = (techs || []).reduce((acc, t) => {
+                acc[String(t._id)] = t.name;
+                return acc;
+            }, {});
+        }
+
+        const hydrated = (logs || []).map((l) => {
+            const obj = l?.toObject ? l.toObject() : l;
+            if (!obj) return obj;
+            if (!obj.technician_name && obj.technician_id) {
+                obj.technician_name = nameById[String(obj.technician_id)] || obj.technician_name;
+            }
+            return obj;
+        });
+
+        res.json(hydrated);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
