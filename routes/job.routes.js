@@ -290,7 +290,14 @@ router.put('/by-job/:jobNumber/confirm', requireAuth, async (req, res) => {
         const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
         res.json(enriched[0]);
     } catch (error) {
-        res.status(400).json({ error: error.message });
+        console.error('Confirm job failed', {
+            jobParam: req.params.jobNumber,
+            tenant: req.tenant?.supervisor_key,
+            technicianId: req.body?.technician_id || req.session?.user?.id,
+            errorName: error?.name,
+            errorMessage: error?.message
+        });
+        res.status(500).json({ error: error.message, name: error?.name || 'Error' });
     }
 });
 
