@@ -619,7 +619,8 @@ router.post('/', requireSupervisor, async (req, res) => {
 });
 
 // Update a job by Job ID (job_number)
-router.put('/by-j
+router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
+    try {
         const job = await Job.findOne({
             ...tenantQuery(req.tenant.supervisor_key),
             job_number: req.params.jobNumber
@@ -665,8 +666,7 @@ router.put('/by-j
                     confirmed_by_technician: !!t.confirmed_by_technician,
                     confirmed_date: t.confirmed_date ? new Date(t.confirmed_date) : null,
                     consumed_hours: Number(t.consumed_hours || 0)
-                }))
-                .filter((t) => t.technician_name);
+                }));
         }
 
         const prevAllocated = Number(job.allocated_hours || 0);
@@ -802,7 +802,8 @@ router.put('/:id', requireSupervisor, async (req, res) => {
         if (Object.prototype.hasOwnProperty.call(body, 'allocated_hours')) {
             const allocated = Number(job.allocated_hours || 0);
             const consumed = Number(job.consumed_hours || 0);
-            if  allocated - consumed);
+            if (!Number.isNaN(allocated) && allocated >= 0 && allocated !== prevAllocated) {
+                const remaining = Math.max(0, allocated - consumed);
                 const overrunHours = Math.max(0, consumed - allocated);
                 const progress = allocated > 0 ? (consumed / allocated) * 100 : 0;
 
@@ -841,14 +842,14 @@ router.post('/by-job/:jobNumber/subtasks', requireSupervisor, async (req, res) =
             return res.status(400).json({ error: 'Sum of subtask allocated hours cannot exceed job allocated hours' });
         }
 
-        const assg
+        const assigned = Array.isArray(assigned_technicians) ? assigned_technicians : [];
+        const assignedNorm = assigned
             .filter((a) => a && a.technician_id)
             .map((a) => ({
                 technician_id: a.technician_id,
                 technician_name: a.technician_name || '',
                 allocated_hours: Number(a.allocated_hours || 0)
-            }))
-            .filter((a) => a.technician_name);
+            }));
 
         job.subtasks.push({
             title,
@@ -887,8 +888,7 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId', requireSupervisor, async (r
                     technician_id: a.technician_id,
                     technician_name: a.technician_name || '',
                     allocated_hours: Number(a.allocated_hours || 0)
-                }))
-                .filter((a) => a.technician_name);
+                }));
         }
 
         const totalSubtaskAllocated = (job.subtasks || []).reduce((sum, s) => sum + Number(s.allocated_hours || 0), 0);
