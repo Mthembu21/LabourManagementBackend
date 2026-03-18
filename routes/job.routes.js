@@ -658,7 +658,8 @@ router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
         if (Object.prototype.hasOwnProperty.call(body, 'target_completion_date')) job.target_completion_date = body.target_completion_date ? new Date(body.target_completion_date) : null;
 
         if (Object.prototype.hasOwnProperty.call(body, 'technicians') && Array.isArray(body.technicians)) {
-            job.technicians = body.technicians
+            const prevTechIds = new Set((job.technicians || []).map((t) => String(t?.technician_id || '')).filter(Boolean));
+            const nextTechs = body.technicians
                 .filter((t) => t && t.technician_id)
                 .map((t) => ({
                     technician_id: t.technician_id,
@@ -667,6 +668,27 @@ router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
                     confirmed_date: t.confirmed_date ? new Date(t.confirmed_date) : null,
                     consumed_hours: Number(t.consumed_hours || 0)
                 }));
+
+            const nextTechIds = new Set(nextTechs.map((t) => String(t?.technician_id || '')).filter(Boolean));
+            const removedTechIds = Array.from(prevTechIds).filter((id) => !nextTechIds.has(id));
+
+            job.technicians = nextTechs;
+
+            // Fully remove deleted technicians from all stage assignments + stage progress
+            if (removedTechIds.length) {
+                for (const st of (job.subtasks || [])) {
+                    if (Array.isArray(st.assigned_technicians)) {
+                        st.assigned_technicians = st.assigned_technicians.filter(
+                            (a) => !removedTechIds.includes(String(a?.technician_id || ''))
+                        );
+                    }
+                    if (Array.isArray(st.progress_by_technician)) {
+                        st.progress_by_technician = st.progress_by_technician.filter(
+                            (p) => !removedTechIds.includes(String(p?.technician_id || ''))
+                        );
+                    }
+                }
+            }
         }
 
         const prevAllocated = Number(job.allocated_hours || 0);
