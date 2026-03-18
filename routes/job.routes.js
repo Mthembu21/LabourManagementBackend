@@ -24,8 +24,7 @@ function normalizeSubtasksInput(subtasks) {
                     technician_id: a.technician_id,
                     technician_name: a.technician_name || '',
                     allocated_hours: Number(a.allocated_hours || 0)
-                }))
-                .filter((a) => a.technician_name);
+                }));
 
             return {
                 category,
@@ -158,8 +157,55 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
         consumedByJobTech.set(`${jobId}:${techId}`, (consumedByJobTech.get(`${jobId}:${techId}`) || 0) + hrs);
     }
 
+    // Hydrate missing technician names (job-level + subtask-level assignments)
+    const missingTechIds = new Set();
+    for (const j of docs) {
+        const obj = j?.toObject ? j.toObject() : j;
+        for (const t of (obj?.technicians || [])) {
+            if (t?.technician_id && !t?.technician_name) missingTechIds.add(String(t.technician_id));
+        }
+        for (const st of (obj?.subtasks || [])) {
+            for (const a of (st?.assigned_technicians || [])) {
+                if (a?.technician_id && !a?.technician_name) missingTechIds.add(String(a.technician_id));
+            }
+        }
+    }
+
+    let techNameById = {};
+    if (missingTechIds.size) {
+        const techs = await Technician.find({
+            ...tenantQuery(supervisorKey),
+            _id: { $in: Array.from(missingTechIds) }
+        }).select({ _id: 1, name: 1 });
+        techNameById = (techs || []).reduce((acc, t) => {
+            acc[String(t._id)] = t.name;
+            return acc;
+        }, {});
+    }
+
     return docs.map((j) => {
         const obj = j.toObject();
+        obj.technicians = Array.isArray(obj.technicians) ? obj.technicians.map((t) => {
+            if (!t) return t;
+            if (!t.technician_name && t.technician_id) {
+                return { ...t, technician_name: techNameById[String(t.technician_id)] || t.technician_name || '' };
+            }
+            return t;
+        }) : [];
+
+        obj.subtasks = Array.isArray(obj.subtasks) ? obj.subtasks.map((st) => {
+            if (!st) return st;
+            const assigned = Array.isArray(st.assigned_technicians) ? st.assigned_technicians : [];
+            const nextAssigned = assigned.map((a) => {
+                if (!a) return a;
+                if (!a.technician_name && a.technician_id) {
+                    return { ...a, technician_name: techNameById[String(a.technician_id)] || a.technician_name || '' };
+                }
+                return a;
+            });
+            return { ...st, assigned_technicians: nextAssigned };
+        }) : [];
+
         const firstTech = (obj.technicians || [])[0];
         const jobAllocated = Number(obj.allocated_hours || 0);
 
@@ -573,8 +619,7 @@ router.post('/', requireSupervisor, async (req, res) => {
 });
 
 // Update a job by Job ID (job_number)
-router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
-    try {
+router.put('/by-j
         const job = await Job.findOne({
             ...tenantQuery(req.tenant.supervisor_key),
             job_number: req.params.jobNumber
@@ -757,8 +802,7 @@ router.put('/:id', requireSupervisor, async (req, res) => {
         if (Object.prototype.hasOwnProperty.call(body, 'allocated_hours')) {
             const allocated = Number(job.allocated_hours || 0);
             const consumed = Number(job.consumed_hours || 0);
-            if (!Number.isNaN(allocated) && allocated >= 0 && allocated !== prevAllocated) {
-                const remaining = Math.max(0, allocated - consumed);
+            if  allocated - consumed);
                 const overrunHours = Math.max(0, consumed - allocated);
                 const progress = allocated > 0 ? (consumed / allocated) * 100 : 0;
 
@@ -797,8 +841,7 @@ router.post('/by-job/:jobNumber/subtasks', requireSupervisor, async (req, res) =
             return res.status(400).json({ error: 'Sum of subtask allocated hours cannot exceed job allocated hours' });
         }
 
-        const assigned = Array.isArray(assigned_technicians) ? assigned_technicians : [];
-        const assignedNorm = assigned
+        const assg
             .filter((a) => a && a.technician_id)
             .map((a) => ({
                 technician_id: a.technician_id,
