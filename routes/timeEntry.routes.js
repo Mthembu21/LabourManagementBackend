@@ -88,6 +88,15 @@ const updateJobForApprovedDelta = async ({ supervisorKey, jobId, subtaskId, tech
     job.progress_percentage = Math.min(100, progress);
     job.status = computeJobStatus(job);
 
+    // Rule A: auto-complete when all assigned stages are complete (independent of remaining hours)
+    if (job.status !== 'completed' && isJobFullyCompleteByAssignments(job)) {
+        job.status = 'completed';
+        job.progress_percentage = 100;
+        job.remaining_hours = 0;
+        job.actual_completion_date = new Date();
+        job.total_hours_utilized = Number(job.consumed_hours || 0);
+    }
+
     await job.save();
 };
 
@@ -247,14 +256,7 @@ router.put('/:id/decline', requireSupervisor, async (req, res) => {
 
 const isJobFullyCompleteByAssignments = (jobDoc) => {
     if (!jobDoc) return false;
-    const subtasks = jobDoc.subtasks || [];
-    if (!subtasks.length) return false;
-
-    // Consider a subtask "required" only if it has explicit technician assignments.
-    const requiredSubtasks = subtasks.filter((st) => Array.isArray(st?.assigned_technicians) && st.assigned_technicians.length > 0);
-    if (!requiredSubtasks.length) return false;
-
-    for (const st of requiredSubtasks) {
+    for (const st of (jobDoc.subtasks || [])) {
         for (const a of (st.assigned_technicians || [])) {
             const techId = a?.technician_id;
             if (!techId) return false;
@@ -267,7 +269,6 @@ const isJobFullyCompleteByAssignments = (jobDoc) => {
 };
 
 const upsertSubtaskProgressForTechnician = (jobDoc, subtaskId, technicianId, progressPct) => {
-    if (!jobDoc || !subtaskId || !technicianId) return;
     const st = (jobDoc.subtasks || []).id(subtaskId);
     if (!st) return;
 
@@ -276,9 +277,26 @@ const upsertSubtaskProgressForTechnician = (jobDoc, subtaskId, technicianId, pro
     const pct = Math.max(0, Math.min(100, Number(progressPct || 0)));
     if (existing) {
         existing.progress_percentage = pct;
+        if (!existing.started_at && pct > 1e-9) {
+            existing.started_at = new Date();
+        }
+        if (pct >= 100 - 1e-9) {
+            existing.completed = true;
+            if (!existing.completed_at) existing.completed_at = new Date();
+        } else {
+            existing.completed = false;
+            existing.completed_at = null;
+        }
         existing.updated_at = new Date();
     } else {
-        st.progress_by_technician.push({ technician_id: technicianId, progress_percentage: pct, updated_at: new Date() });
+        st.progress_by_technician.push({
+            technician_id: technicianId,
+            progress_percentage: pct,
+            started_at: pct > 1e-9 ? new Date() : null,
+            completed: pct >= 100 - 1e-9,
+            completed_at: pct >= 100 - 1e-9 ? new Date() : null,
+            updated_at: new Date()
+        });
     }
 };
 
@@ -333,8 +351,17 @@ const computeJobStatus = (jobDoc) => {
     if (!jobDoc) return 'in_progress';
     if (jobDoc.status === 'completed') return 'completed';
 
+    if (Boolean(jobDoc.completed)) return 'completed';
+
+    const derivedPct = Number(
+        jobDoc.aggregated_progress_percentage ?? jobDoc.progress_percentage ?? 0
+    );
+    if (derivedPct >= 100 - 1e-9) return 'completed';
+
     const allocated = Number(jobDoc.allocated_hours || 0);
     const consumed = Number(jobDoc.consumed_hours || 0);
+
+    if (allocated > 0 && consumed >= allocated - 1e-9) return 'completed';
     if (allocated > 0 && consumed > allocated) return 'overrun';
 
     const today = normalizeDayOnly(new Date());
@@ -769,12 +796,7 @@ router.post('/', requireAuth, async (req, res) => {
                 job.status = computeJobStatus(job);
 
                 // Auto-complete when all assigned stages are complete
-                const allocatedTotal = Number(job.allocated_hours || 0);
-                const hasNoRemainingAllocatedHours = allocatedTotal > 0
-                    ? (Number(job.remaining_hours || 0) <= 1e-6)
-                    : false;
-
-                if (job.status !== 'completed' && isJobFullyCompleteByAssignments(job) && hasNoRemainingAllocatedHours) {
+                if (job.status !== 'completed' && isJobFullyCompleteByAssignments(job)) {
                     job.status = 'completed';
                     job.progress_percentage = 100;
                     job.remaining_hours = 0;

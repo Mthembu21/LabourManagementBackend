@@ -37,18 +37,150 @@ function normalizeSubtasksInput(subtasks) {
         });
 }
 
+function isJobFullyCompleteByAssignments(jobDoc) {
+    if (!jobDoc) return false;
+    for (const st of (jobDoc.subtasks || [])) {
+        for (const a of (st.assigned_technicians || [])) {
+            const techId = a?.technician_id;
+            if (!techId) return false;
+            const p = (st.progress_by_technician || []).find((x) => String(x?.technician_id) === String(techId));
+            const pct = Number(p?.progress_percentage || 0);
+            if (pct < 100 - 1e-9) return false;
+        }
+    }
+    return true;
+}
+
+// Manual stage completion (technician override)
+router.put('/by-job/:jobNumber/subtasks/:subtaskId/complete', requireAuth, async (req, res) => {
+    try {
+        const technicianId = req.body?.technician_id || req.session?.user?.id;
+        if (!technicianId) return res.status(400).json({ error: 'technician_id is required' });
+
+        const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: req.params.jobNumber });
+        if (!job) return res.status(404).json({ error: 'Job not found' });
+
+        const st = (job.subtasks || []).id(req.params.subtaskId);
+        if (!st) return res.status(404).json({ error: 'Subtask not found' });
+
+        const isSupervisor = req.session?.user?.type === 'supervisor';
+        if (!isSupervisor) {
+            const assigned = Array.isArray(st.assigned_technicians) ? st.assigned_technicians : [];
+            const isAssigned = assigned.some((a) => String(a?.technician_id) === String(technicianId));
+            if (!isAssigned) return res.status(403).json({ error: 'Not allowed' });
+        }
+
+        st.progress_by_technician = Array.isArray(st.progress_by_technician) ? st.progress_by_technician : [];
+        const existing = st.progress_by_technician.find((p) => String(p?.technician_id) === String(technicianId));
+        if (existing) {
+            existing.progress_percentage = 100;
+            if (!existing.started_at) existing.started_at = new Date();
+            existing.completed = true;
+            if (!existing.completed_at) existing.completed_at = new Date();
+            existing.updated_at = new Date();
+        } else {
+            st.progress_by_technician.push({
+                technician_id: technicianId,
+                progress_percentage: 100,
+                started_at: new Date(),
+                completed: true,
+                completed_at: new Date(),
+                updated_at: new Date()
+            });
+        }
+
+        // Rule A: job is completed when all assigned stages are completed
+        if (job.status !== 'completed' && isJobFullyCompleteByAssignments(job)) {
+            job.status = 'completed';
+            job.progress_percentage = 100;
+            job.remaining_hours = 0;
+            job.actual_completion_date = new Date();
+            job.total_hours_utilized = Number(job.consumed_hours || 0);
+        }
+
+        await job.save();
+        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        res.json(enriched[0]);
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
 function normalizeDayOnly(d) {
     const dt = new Date(d);
     dt.setHours(0, 0, 0, 0);
     return dt;
 }
 
+function computeAtRiskInfo(jobObj) {
+    if (!jobObj) return { risk_reason: '', risk_reason_details: '' };
+
+    const allocated = Number(jobObj.allocated_hours || 0);
+    const consumed = Number(jobObj.consumed_hours || 0);
+
+    if (Number(jobObj.bottleneck_count || 0) >= 2) {
+        return {
+            risk_reason: 'bottlenecks',
+            risk_reason_details: `${Number(jobObj.bottleneck_count || 0)} issues reported on this job.`
+        };
+    }
+
+    const today = normalizeDayOnly(new Date());
+    const target = jobObj.target_completion_date ? normalizeDayOnly(jobObj.target_completion_date) : null;
+    if (target && today > target) {
+        return {
+            risk_reason: 'overdue',
+            risk_reason_details: `Target completion date was ${target.toLocaleDateString()}.`
+        };
+    }
+
+    if (target && today <= target) {
+        const remainingHours = Math.max(0, allocated - consumed);
+        let workdaysRemaining = 0;
+        const cursor = new Date(today);
+        while (cursor <= target) {
+            const day = cursor.getDay();
+            if (day !== 0 && day !== 6) workdaysRemaining += 1;
+            cursor.setDate(cursor.getDate() + 1);
+        }
+
+        const techIds = new Set();
+        for (const t of (jobObj.technicians || [])) {
+            if (t?.technician_id) techIds.add(t.technician_id.toString());
+        }
+        for (const st of (jobObj.subtasks || [])) {
+            for (const a of (st?.assigned_technicians || [])) {
+                if (a?.technician_id) techIds.add(a.technician_id.toString());
+            }
+        }
+        const assignedCount = techIds.size || 1;
+        const capacity = workdaysRemaining * 8 * assignedCount;
+        if (remainingHours > capacity + 1e-9) {
+            return {
+                risk_reason: 'insufficient_capacity',
+                risk_reason_details: `${remainingHours.toFixed(1)}h remaining but only ~${capacity.toFixed(1)}h capacity until target date (${workdaysRemaining} workdays × ${assignedCount} techs).`
+            };
+        }
+    }
+
+    return { risk_reason: 'at_risk', risk_reason_details: '' };
+}
+
 function computeDerivedStatus(jobObj) {
     if (!jobObj) return 'in_progress';
     if (jobObj.status === 'completed') return 'completed';
 
+    if (Boolean(jobObj.completed)) return 'completed';
+
+    const derivedPct = Number(
+        jobObj.aggregated_progress_percentage ?? jobObj.progress_percentage ?? 0
+    );
+    if (derivedPct >= 100 - 1e-9) return 'completed';
+
     const allocated = Number(jobObj.allocated_hours || 0);
     const consumed = Number(jobObj.consumed_hours || 0);
+
+    if (allocated > 0 && consumed >= allocated - 1e-9) return 'completed';
     if (allocated > 0 && consumed > allocated) return 'overrun';
 
     if (Number(jobObj.bottleneck_count || 0) >= 2) return 'at_risk';
@@ -242,6 +374,14 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
             const subtaskRemaining = Math.max(0, allocatedHours - subtaskConsumed);
 
             const assigned = Array.isArray(st?.assigned_technicians) ? st.assigned_technicians : [];
+
+            const storedProgress = Array.isArray(st?.progress_by_technician) ? st.progress_by_technician : [];
+            const storedByTechId = new Map(
+                storedProgress
+                    .filter((p) => p && p.technician_id)
+                    .map((p) => [String(p.technician_id), p])
+            );
+
             const nextProgress = assigned.map((a) => {
                 const techId = String(a?.technician_id || '');
                 const consumed = techId && subtaskId
@@ -250,9 +390,21 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
                 const pct = allocatedHours > 0
                     ? Math.max(0, Math.min(100, (consumed / allocatedHours) * 100))
                     : 0;
+
+                const stored = storedByTechId.get(techId);
+                const storedCompleted = Boolean(stored?.completed);
+                const storedCompletedAt = stored?.completed_at ? new Date(stored.completed_at) : null;
+                const storedStartedAt = stored?.started_at ? new Date(stored.started_at) : null;
+
+                const completed = storedCompleted || pct >= 100 - 1e-9;
+                const completedAt = storedCompletedAt;
+
                 return {
                     technician_id: a.technician_id,
                     progress_percentage: pct,
+                    started_at: storedStartedAt,
+                    completed,
+                    completed_at: completedAt,
                     updated_at: new Date()
                 };
             });
@@ -268,11 +420,26 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
         return {
             ...obj,
             subtasks,
-            status: computeDerivedStatus(obj),
+            status: computeDerivedStatus({
+                ...obj,
+                aggregated_progress_percentage: overall,
+                consumed_hours: totalConsumedAcrossSubtasks
+            }),
             assigned_technician_id: firstTech?.technician_id,
             assigned_technician_name: firstTech?.technician_name,
             aggregated_progress_percentage: overall,
-            progress_by_technician: progressByTechnician
+            progress_by_technician: progressByTechnician,
+            ...(computeDerivedStatus({
+                ...obj,
+                aggregated_progress_percentage: overall,
+                consumed_hours: totalConsumedAcrossSubtasks
+            }) === 'at_risk'
+                ? computeAtRiskInfo({
+                    ...obj,
+                    aggregated_progress_percentage: overall,
+                    consumed_hours: totalConsumedAcrossSubtasks
+                })
+                : { risk_reason: '', risk_reason_details: '' })
         };
     });
 }

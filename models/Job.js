@@ -33,6 +33,18 @@ const subtaskProgressSchema = new mongoose.Schema({
         min: 0,
         max: 100
     },
+    started_at: {
+        type: Date,
+        default: null
+    },
+    completed: {
+        type: Boolean,
+        default: false
+    },
+    completed_at: {
+        type: Date,
+        default: null
+    },
     updated_at: {
         type: Date,
         default: Date.now

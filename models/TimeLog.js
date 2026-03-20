@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const IDLE_CATEGORIES = [
     'Housekeeping',
     'Sick',
+    'Leave',
     'Training',
     'Travelling',
     'Site Work',
