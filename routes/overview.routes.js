@@ -8,9 +8,10 @@ const { requireAuth, tenantQuery } = require('../middleware/auth');
 const getMonthRange = (monthStr) => {
     const m = String(monthStr || '').trim();
     if (!/^\d{4}-\d{2}$/.test(m)) return null;
-    const start = new Date(`${m}-01T00:00:00.000Z`);
+    // Use local time boundaries; TimeLog.normalizeLogDate() uses local time.
+    const start = new Date(`${m}-01T00:00:00`);
     if (Number.isNaN(start.getTime())) return null;
-    const end = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1, 0, 0, 0, 0));
+    const end = new Date(start.getFullYear(), start.getMonth() + 1, 1, 0, 0, 0, 0);
     return { start, end };
 };
 
