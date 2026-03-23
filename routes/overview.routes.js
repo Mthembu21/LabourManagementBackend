@@ -5,6 +5,15 @@ const Job = require('../models/Job');
 const TimeLog = require('../models/TimeLog');
 const { requireAuth, tenantQuery } = require('../middleware/auth');
 
+const getMonthRange = (monthStr) => {
+    const m = String(monthStr || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(m)) return null;
+    const start = new Date(`${m}-01T00:00:00.000Z`);
+    if (Number.isNaN(start.getTime())) return null;
+    const end = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1, 0, 0, 0, 0));
+    return { start, end };
+};
+
 const requireManager = (req, res, next) => {
     if (!req.session.user || req.session.user.type !== 'supervisor') {
         return res.status(403).json({ error: 'Supervisor access required' });
@@ -29,49 +38,60 @@ router.get('/workshop', requireAuth, requireManager, async (req, res) => {
     try {
         const keys = ['component', 'pdis', 'rebuild'];
 
+        const month = req.query?.month ? String(req.query.month) : '';
+        const range = getMonthRange(month);
+
         const byWorkshop = {};
         let totalJobsOpened = 0;
         let totalHoursConsumed = 0;
-        let totalAllocated = 0;
-        let totalUtilized = 0;
+        let totalProductive = 0;
+        let totalNonProductive = 0;
 
         for (const k of keys) {
             const jobs = await Job.find(tenantQuery(k)).limit(500);
-            const logs = await TimeLog.find({ ...tenantQuery(k) }).limit(5000);
+
+            const logQuery = { ...tenantQuery(k) };
+            if (range) {
+                logQuery.log_date = { $gte: range.start, $lt: range.end };
+            }
+            const logs = await TimeLog.find(logQuery).limit(20000);
 
             const jobsOpened = jobs.length;
             const hoursConsumed = logs.reduce((sum, l) => sum + Number(l.hours_logged || 0), 0);
 
-            const allocatedTotal = jobs.reduce((sum, j) => sum + Number(j.allocated_hours || 0), 0);
-            const utilizedTotal = jobs.reduce((sum, j) => sum + Number(j.total_hours_utilized || j.consumed_hours || 0), 0);
-            const utilization = allocatedTotal > 0 ? Math.max(0, Math.min(100, (utilizedTotal / allocatedTotal) * 100)) : 0;
+            const productiveHours = logs.reduce((sum, l) => sum + (l?.is_idle ? 0 : Number(l?.hours_logged || 0)), 0);
+            const nonProductiveHours = logs.reduce((sum, l) => sum + (l?.is_idle ? Number(l?.hours_logged || 0) : 0), 0);
+            const denom = productiveHours + nonProductiveHours;
+            const utilization = denom > 0 ? Math.max(0, Math.min(100, (productiveHours / denom) * 100)) : 0;
 
             byWorkshop[k] = {
                 key: k,
                 label: keyToLabel[k] || k,
                 jobs_opened: jobsOpened,
                 hours_consumed: hoursConsumed,
-                allocated_hours: allocatedTotal,
-                utilized_hours: utilizedTotal,
+                productive_hours: productiveHours,
+                non_productive_hours: nonProductiveHours,
                 utilization_percentage: utilization
             };
 
             totalJobsOpened += jobsOpened;
             totalHoursConsumed += hoursConsumed;
-            totalAllocated += allocatedTotal;
-            totalUtilized += utilizedTotal;
+            totalProductive += productiveHours;
+            totalNonProductive += nonProductiveHours;
         }
 
-        const utilizationAll = totalAllocated > 0
-            ? Math.max(0, Math.min(100, (totalUtilized / totalAllocated) * 100))
+        const denomAll = totalProductive + totalNonProductive;
+        const utilizationAll = denomAll > 0
+            ? Math.max(0, Math.min(100, (totalProductive / denomAll) * 100))
             : 0;
 
         res.json({
+            month: range ? month : null,
             total_jobs_opened: totalJobsOpened,
             total_hours_consumed: totalHoursConsumed,
             labour_utilization_percentage: utilizationAll,
-            allocated_hours: totalAllocated,
-            utilized_hours: totalUtilized,
+            productive_hours: totalProductive,
+            non_productive_hours: totalNonProductive,
             by_workshop: byWorkshop
         });
     } catch (error) {
