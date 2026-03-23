@@ -331,8 +331,8 @@ const getNormalLimitForDate = (dateObj) => {
     const holiday = getSouthAfricanHolidayInfo(dateObj);
     if (holiday.is_public_holiday) return 0; // Public holiday => all overtime
     if (dayIndex === 0 || dayIndex === 6) return 0; // Weekend => all overtime
-    if (dayIndex === 5) return 7.5; // Friday (7h productive + 0.5h lunch)
-    return 8.5; // Mon-Thu (8h productive + 0.5h lunch)
+    if (dayIndex === 5) return 7; // Friday
+    return 8; // Mon-Thu
 };
 
 const normalizeDayOnly = (d) => normalizeHolidayDayOnly(d);

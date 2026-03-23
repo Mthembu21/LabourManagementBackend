@@ -265,7 +265,15 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
                     subtask_id: '$subtask_id',
                     technician_id: '$technician_id'
                 },
-                consumed: { $sum: '$hours_logged' }
+                consumed: {
+                    $sum: {
+                        $cond: [
+                            { $gt: ['$approved_hours', 0] },
+                            '$approved_hours',
+                            '$hours_logged'
+                        ]
+                    }
+                }
             }
         }
     ]);
@@ -387,8 +395,11 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
                 const consumed = techId && subtaskId
                     ? (consumedByJobSubtaskTech.get(`${String(obj.job_number)}:${subtaskId}:${techId}`) || 0)
                     : 0;
-                const pct = allocatedHours > 0
-                    ? Math.max(0, Math.min(100, (consumed / allocatedHours) * 100))
+
+                const techAllocated = Number(a?.allocated_hours || 0);
+                const denomAllocated = techAllocated > 0 ? techAllocated : allocatedHours;
+                const pct = denomAllocated > 0
+                    ? Math.max(0, Math.min(100, (consumed / denomAllocated) * 100))
                     : 0;
 
                 const stored = storedByTechId.get(techId);
