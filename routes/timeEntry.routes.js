@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const TimeLog = require('../models/TimeLog');
+const MonthlyHoursSummary = require('../models/MonthlyHoursSummary');
 const Job = require('../models/Job');
 const JobReport = require('../models/JobReport');
 const Technician = require('../models/Technician');
@@ -290,13 +291,27 @@ const upsertSubtaskProgressForTechnician = (jobDoc, subtaskId, technicianId, pro
         existing.updated_at = new Date();
     } else {
         st.progress_by_technician.push({
-            technician_id: technicianId,
+            technician_id: String(technicianId),
             progress_percentage: pct,
             started_at: pct > 1e-9 ? new Date() : null,
             completed: pct >= 100 - 1e-9,
             completed_at: pct >= 100 - 1e-9 ? new Date() : null,
             updated_at: new Date()
         });
+    }
+    
+    // Update overall stage status if all technicians are complete
+    const allTechs = st.assigned_technicians || [];
+    const allCompleted = allTechs.every(tech => {
+        const progress = st.progress_by_technician?.find(p => String(p.technician_id) === String(tech.technician_id));
+        return progress && progress.completed;
+    });
+    
+    if (allCompleted) {
+        st.status = 'completed';
+        st.completed_at = new Date();
+    } else if (pct > 1e-9) {
+        st.status = 'in_progress';
     }
 };
 
@@ -358,10 +373,11 @@ const computeJobStatus = (jobDoc) => {
     );
     if (derivedPct >= 100 - 1e-9) return 'completed';
 
+    // Don't auto-complete based on consumed hours alone - let stage completion handle this
+    // This prevents jobs from disappearing when hours are partially booked
     const allocated = Number(jobDoc.allocated_hours || 0);
     const consumed = Number(jobDoc.consumed_hours || 0);
 
-    if (allocated > 0 && consumed >= allocated - 1e-9) return 'completed';
     if (allocated > 0 && consumed > allocated) return 'overrun';
 
     const today = normalizeDayOnly(new Date());
@@ -378,19 +394,8 @@ const computeJobStatus = (jobDoc) => {
             if (day !== 0 && day !== 6) workdaysRemaining += 1;
             cursor.setDate(cursor.getDate() + 1);
         }
-
-        const techIds = new Set();
-        for (const t of (jobDoc.technicians || [])) {
-            if (t?.technician_id) techIds.add(t.technician_id.toString());
-        }
-        for (const st of (jobDoc.subtasks || [])) {
-            for (const a of (st?.assigned_technicians || [])) {
-                if (a?.technician_id) techIds.add(a.technician_id.toString());
-            }
-        }
-        const assignedCount = techIds.size || 1;
-        const capacity = workdaysRemaining * 8 * assignedCount;
-        if (remainingHours > capacity + 1e-9) return 'at_risk';
+        const avgDaily = workdaysRemaining > 0 ? remainingHours / workdaysRemaining : 0;
+        if (avgDaily > 8.5) return 'at_risk';
     }
 
     return 'in_progress';
@@ -640,7 +645,12 @@ router.post('/', requireAuth, async (req, res) => {
                 return res.status(400).json({ error: 'Technician is not assigned to this job stage' });
             }
             resolvedSubtaskTitle = allocation.subtask_title;
+        }
 
+        const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
+        const defaultStatus = needsApproval ? 'pending' : 'approved';
+
+        if (subtaskId) {
             const existingStageLogs = await TimeLog.find({
                 ...tenantQuery(req.tenant.supervisor_key),
                 technician_id: technicianId,
@@ -648,14 +658,20 @@ router.post('/', requireAuth, async (req, res) => {
                 subtask_id: String(subtaskId),
                 is_idle: false
             });
-            const alreadyLogged = existingStageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+            
+            // Use approved hours if approval is required, otherwise use logged hours
+            const alreadyLogged = existingStageLogs.reduce((sum, e) => {
+                if (needsApproval) {
+                    return sum + Number(e.approved_hours || 0);
+                } else {
+                    return sum + Number(e.hours_logged || 0);
+                }
+            }, 0);
+            
             if ((alreadyLogged + hoursLogged) > (allocation.allocated_hours + 1e-9)) {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job stage' });
             }
         }
-
-        const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
-        const defaultStatus = needsApproval ? 'pending' : 'approved';
 
         let entry;
         if (existingSameJob) {
@@ -806,6 +822,29 @@ router.post('/', requireAuth, async (req, res) => {
 
                 await job.save();
             }
+        }
+        
+        // Update monthly hours summary
+        try {
+            const entryYear = logDate.getFullYear();
+            const entryMonth = logDate.getMonth() + 1;
+            
+            await MonthlyHoursSummary.updateMonthlySummary(
+                req.tenant.supervisor_key,
+                technicianId,
+                entryYear,
+                entryMonth,
+                {
+                    hours_logged: entry.hours_logged,
+                    is_idle: entry.is_idle,
+                    normal_hours: entry.normal_hours,
+                    overtime_hours: entry.overtime_hours,
+                    payable_hours: entry.payable_hours
+                }
+            );
+        } catch (summaryError) {
+            // Log error but don't fail the time entry creation
+            console.error('Failed to update monthly summary:', summaryError);
         }
         
         res.status(201).json(entry);
@@ -1070,6 +1109,212 @@ router.delete('/:id', requireAuth, async (req, res) => {
         res.json({ message: 'Time log deleted' });
     } catch (error) {
         res.status(400).json({ error: error.message });
+    }
+});
+
+// Monthly Hours Summary endpoints
+const MonthlyTransitionService = require('../services/monthlyTransitionService');
+
+// Get monthly summaries for technicians
+router.get('/monthly-summaries', requireAuth, async (req, res) => {
+    try {
+        const { technician_ids, start_date, end_date } = req.query;
+        
+        if (!start_date || !end_date) {
+            return res.status(400).json({ error: 'start_date and end_date are required' });
+        }
+        
+        const startDate = new Date(start_date);
+        const endDate = new Date(end_date);
+        
+        if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+            return res.status(400).json({ error: 'Invalid date format' });
+        }
+        
+        let technicianIds = technician_ids;
+        if (typeof technician_ids === 'string') {
+            technicianIds = technician_ids.split(',').map(id => id.trim()).filter(id => id);
+        }
+        
+        const summaries = await MonthlyHoursSummary.getSummariesForDateRange(
+            req.tenant.supervisor_key,
+            technicianIds,
+            startDate,
+            endDate
+        );
+        
+        res.json(summaries);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get current month summary for a technician
+router.get('/monthly-summary/current/:technicianId', requireAuth, async (req, res) => {
+    try {
+        const deny = requireSelfOrSupervisor(req, res, req.params.technicianId);
+        if (deny) return;
+        
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = now.getMonth() + 1;
+        
+        const summary = await MonthlyHoursSummary.getOrCreateMonthlySummary(
+            req.tenant.supervisor_key,
+            req.params.technicianId,
+            year,
+            month
+        );
+        
+        res.json(summary);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Update monthly summary (called internally when time entries are created/updated)
+router.post('/monthly-summary/update', requireAuth, async (req, res) => {
+    try {
+        const { technician_id, year, month, time_entry_data } = req.body;
+        
+        if (!technician_id || !year || !month || !time_entry_data) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+        
+        // Only supervisors can update summaries (or system calls)
+        if (req.session.user?.type !== 'supervisor') {
+            return res.status(403).json({ error: 'Supervisor access required' });
+        }
+        
+        const summary = await MonthlyHoursSummary.updateMonthlySummary(
+            req.tenant.supervisor_key,
+            technician_id,
+            year,
+            month,
+            time_entry_data
+        );
+        
+        res.json(summary);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Clear current month data (for new month transition)
+router.post('/monthly-summary/clear-current', requireSupervisor, async (req, res) => {
+    try {
+        const deny = requireForemanOrManager(req, res);
+        if (deny) return;
+        
+        const { technician_ids } = req.body;
+        
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = now.getMonth() + 1;
+        
+        let filter = {
+            supervisor_key: req.tenant.supervisor_key,
+            year: year,
+            month: month
+        };
+        
+        if (technician_ids && technician_ids.length > 0) {
+            filter.technician_id = { $in: technician_ids };
+        }
+        
+        const result = await MonthlyHoursSummary.deleteMany(filter);
+        
+        res.json({ 
+            message: 'Current month summaries cleared successfully',
+            deleted_count: result.deletedCount
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get daily productive percentage data for technicians
+router.get('/daily-productivity', requireAuth, async (req, res) => {
+    try {
+        const { technician_ids, start_date, end_date } = req.query;
+        
+        if (!start_date || !end_date) {
+            return res.status(400).json({ error: 'start_date and end_date are required' });
+        }
+        
+        const startDate = new Date(start_date);
+        const endDate = new Date(end_date);
+        
+        if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+            return res.status(400).json({ error: 'Invalid date format' });
+        }
+        
+        let technicianIds = technician_ids;
+        if (typeof technician_ids === 'string') {
+            technicianIds = technician_ids.split(',').map(id => id.trim()).filter(id => id);
+        }
+        
+        // Default to all technicians if none specified
+        if (!technicianIds || technicianIds.length === 0) {
+            const Technician = require('../models/Technician');
+            const techs = await Technician.find({ ...tenantQuery(req.tenant.supervisor_key), status: 'active' });
+            technicianIds = techs.map(t => t._id.toString());
+        }
+        
+        const dailyProductivityData = {};
+        
+        for (const technicianId of technicianIds) {
+            const dailyData = await TimeLog.calculateDailyProductivity(
+                req.tenant.supervisor_key,
+                technicianId,
+                startDate,
+                endDate
+            );
+            
+            dailyProductivityData[technicianId] = dailyData;
+        }
+        
+        res.json(dailyProductivityData);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Monthly transition endpoints
+router.get('/monthly-transition/status', requireSupervisor, async (req, res) => {
+    try {
+        const status = await MonthlyTransitionService.getCurrentMonthStatus(req.tenant.supervisor_key);
+        res.json(status);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+router.post('/monthly-transition/perform', requireSupervisor, async (req, res) => {
+    try {
+        const deny = requireForemanOrManager(req, res);
+        if (deny) return;
+        
+        const result = await MonthlyTransitionService.checkAndTransitionMonth(req.tenant.supervisor_key);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+router.post('/monthly-transition/force-clear', requireSupervisor, async (req, res) => {
+    try {
+        const deny = requireForemanOrManager(req, res);
+        if (deny) return;
+        
+        const { technician_ids } = req.body;
+        const result = await MonthlyTransitionService.forceTransitionToCurrentMonth(
+            req.tenant.supervisor_key, 
+            technician_ids
+        );
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
 });
 
