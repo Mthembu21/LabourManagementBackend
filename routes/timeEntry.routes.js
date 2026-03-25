@@ -1263,7 +1263,15 @@ router.get('/daily-productivity', requireAuth, async (req, res) => {
         
         const dailyProductivityData = {};
         
+        console.log('🔍 Backend API called with:', {
+            technicianIds,
+            technicianIdsType: typeof technicianIds,
+            startDate,
+            endDate
+        });
+        
         for (const technicianId of technicianIds) {
+            console.log(`🔍 Processing technician ${technicianId}...`);
             const dailyData = await TimeLog.calculateDailyProductivity(
                 req.tenant.supervisor_key,
                 technicianId,
@@ -1271,8 +1279,15 @@ router.get('/daily-productivity', requireAuth, async (req, res) => {
                 endDate
             );
             
+            console.log(`🔍 Technician ${technicianId} returned ${dailyData.length} days of data`);
             dailyProductivityData[technicianId] = dailyData;
         }
+        
+        console.log('🔍 Final dailyProductivityData keys:', Object.keys(dailyProductivityData));
+        console.log('🔍 Final dailyProductivityData sample:', {
+            sampleTech: Object.keys(dailyProductivityData)[0],
+            sampleData: dailyProductivityData[Object.keys(dailyProductivityData)[0]]
+        });
         
         res.json(dailyProductivityData);
     } catch (error) {

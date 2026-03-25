@@ -219,6 +219,13 @@ timeLogSchema.statics.calculateDailyProductivity = async (supervisorKey, technic
     const TimeLog = mongoose.model('TimeLog');
     const { eachDayOfInterval } = require('date-fns');
     
+    console.log('🔍 Backend calculateDailyProductivity called:', {
+        supervisorKey,
+        technicianId,
+        startDate,
+        endDate
+    });
+    
     const dailyData = [];
     const days = eachDayOfInterval({ start: startDate, end: endDate });
     
@@ -233,6 +240,8 @@ timeLogSchema.statics.calculateDailyProductivity = async (supervisorKey, technic
             technician_id: technicianId,
             log_date: { $gte: dayStart, $lte: dayEnd }
         });
+        
+        console.log(`🔍 Day ${day.toISOString()} has ${entries.length} entries for technician ${technicianId}`);
         
         // Categorize hours
         let totalHours = 0;
@@ -301,6 +310,7 @@ timeLogSchema.statics.calculateDailyProductivity = async (supervisorKey, technic
         });
     }
     
+    console.log('🔍 Backend returning dailyData:', dailyData);
     return dailyData.filter(d => d.availableHours > 0); // Filter out days with no available hours
 };
 
