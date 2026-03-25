@@ -60,10 +60,26 @@ router.get('/workshop', requireAuth, requireManager, async (req, res) => {
             const jobsOpened = jobs.length;
             const hoursConsumed = logs.reduce((sum, l) => sum + Number(l.hours_logged || 0), 0);
 
-            const productiveHours = logs.reduce((sum, l) => sum + (l?.is_idle ? 0 : Number(l?.hours_logged || 0)), 0);
-            const nonProductiveHours = logs.reduce((sum, l) => sum + (l?.is_idle ? Number(l?.hours_logged || 0) : 0), 0);
-            const denom = productiveHours + nonProductiveHours;
-            const utilization = denom > 0 ? Math.max(0, Math.min(100, (productiveHours / denom) * 100)) : 0;
+            // ✅ Categorize hours properly for utilization calculation
+            const productiveHours = logs.reduce((sum, l) => {
+                if (l.is_idle) return sum;
+                if (l.category === 'Training' || l.category === 'Leave') return sum;
+                return sum + Number(l.hours_logged || 0);
+            }, 0);
+            
+            const idleHours = logs.reduce((sum, l) => 
+                l.is_idle && l.category !== 'Training' && l.category !== 'Leave' 
+                    ? sum + Number(l.hours_logged || 0) 
+                    : sum, 0);
+            
+            const housekeepingHours = logs.reduce((sum, l) => 
+                l.category === 'Housekeeping' 
+                    ? sum + Number(l.hours_logged || 0) 
+                    : sum, 0);
+            
+            // ✅ Available Hours = Productive + Idle + Housekeeping (exclude training & leave)
+            const availableHours = productiveHours + idleHours + housekeepingHours;
+            const utilization = availableHours > 0 ? Math.max(0, Math.min(100, (productiveHours / availableHours) * 100)) : 0;
 
             byWorkshop[k] = {
                 key: k,
@@ -71,19 +87,20 @@ router.get('/workshop', requireAuth, requireManager, async (req, res) => {
                 jobs_opened: jobsOpened,
                 hours_consumed: hoursConsumed,
                 productive_hours: productiveHours,
-                non_productive_hours: nonProductiveHours,
+                non_productive_hours: idleHours + housekeepingHours, // For backwards compatibility
                 utilization_percentage: utilization
             };
 
             totalJobsOpened += jobsOpened;
             totalHoursConsumed += hoursConsumed;
             totalProductive += productiveHours;
-            totalNonProductive += nonProductiveHours;
+            totalNonProductive += idleHours + housekeepingHours; // Use the same logic as above
         }
 
-        const denomAll = totalProductive + totalNonProductive;
-        const utilizationAll = denomAll > 0
-            ? Math.max(0, Math.min(100, (totalProductive / denomAll) * 100))
+        // ✅ Overall utilization should use the same formula: Productive / (Productive + Idle + Housekeeping)
+        // Note: totalNonProductive now contains idle + housekeeping from the loop above
+        const utilizationAll = totalProductive > 0
+            ? Math.max(0, Math.min(100, (totalProductive / (totalProductive + totalNonProductive)) * 100))
             : 0;
 
         res.json({

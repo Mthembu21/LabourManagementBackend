@@ -136,8 +136,10 @@ monthlyHoursSummarySchema.statics.updateMonthlySummary = async function(supervis
     summary.total_days_worked = await this.calculateDaysWorked(supervisorKey, technicianId, year, month);
     summary.average_hours_per_day = summary.total_days_worked > 0 ? summary.total_hours / summary.total_days_worked : 0;
     
-    const totalRecordedHours = summary.productive_hours + summary.non_productive_hours;
-    summary.utilization_percentage = totalRecordedHours > 0 ? (summary.productive_hours / totalRecordedHours) * 100 : 0;
+    // ✅ Utilization = Productive / (Productive + Idle + Housekeeping) * 100 (exclude training & leave)
+    // Note: This assumes summary has separate fields for idle and housekeeping hours
+    const availableHours = summary.productive_hours + (summary.idle_hours || 0) + (summary.housekeeping_hours || 0);
+    summary.utilization_percentage = availableHours > 0 ? (summary.productive_hours / availableHours) * 100 : 0;
     
     summary.last_updated = new Date();
     

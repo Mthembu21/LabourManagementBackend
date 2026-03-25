@@ -279,15 +279,21 @@ timeLogSchema.statics.calculateDailyProductivity = async (supervisorKey, technic
             }
         });
         
-        const availableHours = totalHours - unavailableHours;
-        const productivity = availableHours > 0 ? (productiveHours / availableHours) * 100 : 0;
+        // ✅ Available Hours = Productive + Idle + Housekeeping (exclude training & leave)
+        const availableHours = productiveHours + idleHours + housekeepingHours;
+        
+        // ✅ Utilization = Productive / Available * 100 (exclude training & leave)
         const utilization = availableHours > 0 ? (productiveHours / availableHours) * 100 : 0;
         
-        // Calculate percentages for tooltip breakdowns
-        const productivePercentage = availableHours > 0 ? (productiveHours / availableHours) * 100 : 0;
-        const idlePercentage = availableHours > 0 ? (idleHours / availableHours) * 100 : 0;
-        const housekeepingPercentage = availableHours > 0 ? (housekeepingHours / availableHours) * 100 : 0;
-        const trainingPercentage = totalHours > 0 ? (trainingHours / totalHours) * 100 : 0;
+        // ✅ Productivity = Productive / Total Logged * 100 (includes all recorded hours)
+        const totalLogged = productiveHours + idleHours + housekeepingHours + trainingHours;
+        const productivity = totalLogged > 0 ? (productiveHours / totalLogged) * 100 : 0;
+        
+        // Calculate percentages for tooltip breakdowns (all based on total logged hours)
+        const productivePercentage = totalLogged > 0 ? (productiveHours / totalLogged) * 100 : 0;
+        const idlePercentage = totalLogged > 0 ? (idleHours / totalLogged) * 100 : 0;
+        const housekeepingPercentage = totalLogged > 0 ? (housekeepingHours / totalLogged) * 100 : 0;
+        const trainingPercentage = totalLogged > 0 ? (trainingHours / totalLogged) * 100 : 0;
         
         dailyData.push({
             date: day,
