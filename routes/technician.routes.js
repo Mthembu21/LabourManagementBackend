@@ -19,14 +19,53 @@ router.get('/', requireAuth, async (req, res) => {
 // Create technician
 router.post('/', requireSupervisor, async (req, res) => {
     try {
+        // ✅ Prevent duplicate technicians by employee number
+        const existing = await Technician.findOne({
+            employee_id: req.body.employee_id || req.body.employeeNumber
+        });
+        
+        if (existing) {
+            return res.status(400).json({
+                message: "Technician already exists. Please search and assign instead."
+            });
+        }
+
         const technician = new Technician({
             ...req.body,
-            supervisor_key: req.tenant.supervisor_key
+            supervisor_key: req.tenant.supervisor_key,
+            // ✅ Ensure both fields are set for compatibility
+            employeeNumber: req.body.employeeNumber || req.body.employee_id,
+            employee_id: req.body.employee_id || req.body.employeeNumber
         });
         await technician.save();
         res.status(201).json(technician);
     } catch (error) {
         res.status(400).json({ error: error.message });
+    }
+});
+
+// ✅ GET all technicians (global search)
+router.get('/all', requireAuth, async (req, res) => {
+    try {
+        const technicians = await Technician.find({ isActive: true });
+        res.json(technicians);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// ✅ Optional (Better UX – search)
+router.get('/search', requireAuth, async (req, res) => {
+    const { q } = req.query;
+
+    try {
+        const technicians = await Technician.find({
+            name: { $regex: q || '', $options: 'i' },
+            isActive: true
+        });
+        res.json(technicians);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
     }
 });
 

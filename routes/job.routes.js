@@ -10,6 +10,31 @@ const mongoose = require('mongoose');
 
 const DEFAULT_SUBTASK_TITLES = ['Washing', 'Stripping', 'Assembling & Painting', 'Testing'];
 
+// ✅ Safe Assignment Logic (NO DUPLICATES)
+const assignTechnicianToJob = async (jobId, technicianId, technicianName) => {
+    const job = await Job.findById(jobId);
+    
+    if (!job) throw new Error("Job not found");
+    
+    // Prevent duplicates
+    const isAlreadyAssigned = job.technicians.some(tech => 
+        String(tech.technician_id) === String(technicianId)
+    );
+    
+    if (!isAlreadyAssigned) {
+        job.technicians.push({
+            technician_id: technicianId,
+            technician_name: technicianName,
+            confirmed_by_technician: false,
+            confirmed_date: null,
+            consumed_hours: 0
+        });
+    }
+    
+    await job.save();
+    return job;
+};
+
 function normalizeSubtasksInput(subtasks) {
     if (!Array.isArray(subtasks) || !subtasks.length) return [];
     return subtasks
@@ -559,32 +584,12 @@ router.put('/by-job/:jobNumber/assign-technician', requireSupervisor, async (req
             technicianName = tech.name;
         }
 
-        const existing = (job.technicians || []).find(
-            (t) => t.technician_id && t.technician_id.toString() === String(technicianId)
-        );
-
-        if (!existing) {
-            job.technicians = job.technicians || [];
-            job.technicians.push({
-                technician_id: technicianId,
-                technician_name: technicianName,
-                confirmed_by_technician: false,
-                confirmed_date: null,
-                consumed_hours: 0
-            });
-        } else if (technicianName && !existing.technician_name) {
-            existing.technician_name = technicianName;
+        try {
+            const updatedJob = await assignTechnicianToJob(job._id, technicianId, technicianName);
+            res.json(updatedJob);
+        } catch (error) {
+            res.status(400).json({ error: error.message });
         }
-
-        // Do not block other technicians by resetting an already-active job back to pending_confirmation
-        if (!job.status) {
-            job.status = 'pending_confirmation';
-        }
-
-        await job.save();
-
-        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
-        res.json(enriched[0]);
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -730,19 +735,11 @@ router.post('/', requireSupervisor, async (req, res) => {
                     technicianName = tech.name;
                 }
 
-                const alreadyAssigned = (existingJob.technicians || []).some(
-                    (t) => t.technician_id && t.technician_id.toString() === String(technicianId)
-                );
-
-                if (!alreadyAssigned) {
-                    existingJob.technicians = existingJob.technicians || [];
-                    existingJob.technicians.push({
-                        technician_id: technicianId,
-                        technician_name: technicianName,
-                        confirmed_by_technician: false,
-                        confirmed_date: null,
-                        consumed_hours: 0
-                    });
+                // ✅ Use safe assignment logic instead
+                try {
+                    await assignTechnicianToJob(existingJob._id, technicianId, technicianName);
+                } catch (error) {
+                    // Technician already assigned - continue
                 }
 
                 // Do not block other technicians by resetting an already-active job back to pending_confirmation
@@ -756,11 +753,16 @@ router.post('/', requireSupervisor, async (req, res) => {
             }
         }
 
+        // ✅ Handle single technician assignment with safe logic
         if (!technicians.length && body.assigned_technician_id) {
-            technicians.push({
-                technician_id: body.assigned_technician_id,
-                technician_name: body.assigned_technician_name || ''
-            });
+            const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: body.job_number });
+            if (job) {
+                try {
+                    await assignTechnicianToJob(job._id, body.assigned_technician_id, body.assigned_technician_name || '');
+                } catch (error) {
+                    // Technician already assigned - continue
+                }
+            }
         }
 
         const jobData = {
