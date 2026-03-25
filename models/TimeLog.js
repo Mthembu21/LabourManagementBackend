@@ -214,7 +214,7 @@ timeLogSchema.statics.calculateUtilization = async (supervisorKey, technicianId,
     };
 };
 
-// Calculate daily productive percentages for a technician
+// Calculate daily productive percentages for a technician with detailed breakdowns
 timeLogSchema.statics.calculateDailyProductivity = async (supervisorKey, technicianId, startDate, endDate) => {
     const TimeLog = mongoose.model('TimeLog');
     const { eachDayOfInterval } = require('date-fns');
@@ -228,13 +228,76 @@ timeLogSchema.statics.calculateDailyProductivity = async (supervisorKey, technic
         const dayEnd = new Date(day);
         dayEnd.setHours(23, 59, 59, 999);
         
-        const dayUtilization = await TimeLog.calculateUtilization(supervisorKey, technicianId, dayStart, dayEnd);
+        const entries = await TimeLog.find({
+            supervisor_key: supervisorKey,
+            technician_id: technicianId,
+            log_date: { $gte: dayStart, $lte: dayEnd }
+        });
+        
+        // Categorize hours
+        let totalHours = 0;
+        let productiveHours = 0;
+        let unavailableHours = 0;
+        let utilizationLossHours = 0;
+        let trainingHours = 0;
+        let idleHours = 0;
+        let housekeepingHours = 0;
+        
+        entries.forEach(entry => {
+            const hours = Number(entry.hours_logged || 0);
+            totalHours += hours;
+            
+            const category = TimeLog.determineHourCategory(entry);
+            
+            switch (category) {
+                case HOUR_CATEGORIES.PRODUCTIVE:
+                    productiveHours += hours;
+                    break;
+                case HOUR_CATEGORIES.UNAVAILABLE:
+                    unavailableHours += hours;
+                    if (entry.category === 'Training') {
+                        trainingHours += hours;
+                    }
+                    break;
+                case HOUR_CATEGORIES.UTILIZATION_LOSS:
+                    utilizationLossHours += hours;
+                    if (entry.category === 'Housekeeping') {
+                        housekeepingHours += hours;
+                    } else {
+                        idleHours += hours;
+                    }
+                    break;
+            }
+        });
+        
+        const availableHours = totalHours - unavailableHours;
+        const productivity = availableHours > 0 ? (productiveHours / availableHours) * 100 : 0;
+        const utilization = availableHours > 0 ? (productiveHours / availableHours) * 100 : 0;
+        
+        // Calculate percentages for tooltip breakdowns
+        const productivePercentage = availableHours > 0 ? (productiveHours / availableHours) * 100 : 0;
+        const idlePercentage = availableHours > 0 ? (idleHours / availableHours) * 100 : 0;
+        const housekeepingPercentage = availableHours > 0 ? (housekeepingHours / availableHours) * 100 : 0;
+        const trainingPercentage = totalHours > 0 ? (trainingHours / totalHours) * 100 : 0;
         
         dailyData.push({
             date: day,
-            productiveHours: dayUtilization.productiveHours,
-            availableHours: dayUtilization.availableHours,
-            dailyProductivePercentage: dayUtilization.utilization
+            totalHours,
+            productiveHours,
+            availableHours,
+            unavailableHours,
+            utilizationLossHours,
+            trainingHours,
+            idleHours,
+            housekeepingHours,
+            dailyProductivePercentage: productivity,
+            dailyUtilizationPercentage: utilization,
+            breakdown: {
+                productivePercentage: Math.max(0, Math.min(100, productivePercentage)),
+                idlePercentage: Math.max(0, Math.min(100, idlePercentage)),
+                housekeepingPercentage: Math.max(0, Math.min(100, housekeepingPercentage)),
+                trainingPercentage: Math.max(0, Math.min(100, trainingPercentage))
+            }
         });
     }
     
