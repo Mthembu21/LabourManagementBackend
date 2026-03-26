@@ -425,32 +425,54 @@ const reallocateDayNormalOvertime = async (technicianId, logDate) => {
     const multiplier = getOvertimeMultiplierForDate(day);
     const isAllOvertime = multiplier > 1 || holidayInfo.is_public_holiday || normalLimit === 0;
 
+    // ✅ Validate inputs to prevent calculation errors
+    if (!Array.isArray(logs)) {
+        console.warn('No logs found for overtime calculation');
+        return;
+    }
+
     for (const l of logs) {
-        const hrs = Number(l.hours_logged || 0);
-        const normal = isAllOvertime ? 0 : Math.max(0, Math.min(hrs, normalRemaining));
-        const ot = Math.max(0, hrs - normal);
-        normalRemaining = Math.max(0, normalRemaining - normal);
+        try {
+            const hrs = Number(l.hours_logged || 0);
+            if (hrs < 0) {
+                console.warn('Invalid hours_logged detected:', hrs);
+                continue;
+            }
 
-        const payable = multiplier > 1 ? (hrs * multiplier) : hrs;
-        const nextIsHoliday = Boolean(holidayInfo.is_public_holiday);
-        const nextHolidayName = holidayInfo.public_holiday_name;
+            const normal = isAllOvertime ? 0 : Math.max(0, Math.min(hrs, normalRemaining));
+            const ot = Math.max(0, hrs - normal);
+            normalRemaining = Math.max(0, normalRemaining - normal);
 
-        const needsSave =
-            Number(l.normal_hours || 0) !== normal ||
-            Number(l.overtime_hours || 0) !== ot ||
-            Boolean(l.is_public_holiday) !== nextIsHoliday ||
-            (l.public_holiday_name || null) !== (nextHolidayName || null) ||
-            Number(l.overtime_multiplier || 1) !== multiplier ||
-            Number(l.payable_hours || 0) !== payable;
+            const payable = multiplier > 1 ? (hrs * multiplier) : hrs;
+            const nextIsHoliday = Boolean(holidayInfo.is_public_holiday);
+            const nextHolidayName = holidayInfo.public_holiday_name;
 
-        if (needsSave) {
-            l.normal_hours = normal;
-            l.overtime_hours = ot;
-            l.is_public_holiday = nextIsHoliday;
-            l.public_holiday_name = nextHolidayName || null;
-            l.overtime_multiplier = multiplier;
-            l.payable_hours = payable;
-            await l.save();
+            // ✅ Validate calculated values
+            const normalHours = Math.max(0, normal);
+            const overtimeHours = Math.max(0, ot);
+            const payableHours = Math.max(0, payable);
+            const overtimeMultiplier = Math.max(1, multiplier);
+
+            const needsSave =
+                Number(l.normal_hours || 0) !== normalHours ||
+                Number(l.overtime_hours || 0) !== overtimeHours ||
+                Boolean(l.is_public_holiday) !== nextIsHoliday ||
+                (l.public_holiday_name || null) !== (nextHolidayName || null) ||
+                Number(l.overtime_multiplier || 1) !== overtimeMultiplier ||
+                Number(l.payable_hours || 0) !== payableHours;
+
+            if (needsSave) {
+                l.normal_hours = normalHours;
+                l.overtime_hours = overtimeHours;
+                l.is_public_holiday = nextIsHoliday;
+                l.public_holiday_name = nextHolidayName || null;
+                l.overtime_multiplier = overtimeMultiplier;
+                l.payable_hours = payableHours;
+                await l.save();
+            }
+        } catch (logError) {
+            console.error('Error processing log for overtime:', logError, 'Log ID:', l._id);
+            // Continue processing other logs even if one fails
         }
     }
 };
@@ -703,7 +725,7 @@ router.post('/', requireAuth, async (req, res) => {
             existingSameJob.category = isIdle ? category : null;
             existingSameJob.category_detail = isIdle ? String(categoryDetail || '') : '';
             existingSameJob.subtask_id = isIdle ? null : String(subtaskId);
-            existingSameJob.subtask_title = isIdle ? null : resolvedSubtaskTitle;
+            existingSameJob.subtask_title = isIdle ? null : (resolvedSubtaskTitle || null);
 
             // Approval defaults:
             // - Component: auto-approved at hours_logged
@@ -715,14 +737,19 @@ router.post('/', requireAuth, async (req, res) => {
                 existingSameJob.approval_status = 'pending';
                 existingSameJob.approved_hours = Number(existingSameJob.approved_hours || 0);
             }
-            entry = await existingSameJob.save();
+            try {
+                entry = await existingSameJob.save();
+            } catch (saveError) {
+                console.error('Error saving existing time entry:', saveError);
+                return res.status(400).json({ error: 'Failed to save time entry: ' + saveError.message });
+            }
         } else {
             entry = new TimeLog({
                 supervisor_key: req.tenant.supervisor_key,
                 technician_id: technicianId,
                 job_id: jobId,
                 subtask_id: isIdle ? null : String(subtaskId),
-                subtask_title: isIdle ? null : resolvedSubtaskTitle,
+                subtask_title: isIdle ? null : (resolvedSubtaskTitle || null),
                 hours_logged: hoursLogged,
                 log_date: logDate,
                 category: isIdle ? category : null,
@@ -736,10 +763,20 @@ router.post('/', requireAuth, async (req, res) => {
                 approved_at: null,
                 approval_note: ''
             });
-            await entry.save();
+            try {
+                await entry.save();
+            } catch (saveError) {
+                console.error('Error creating new time entry:', saveError);
+                return res.status(400).json({ error: 'Failed to create time entry: ' + saveError.message });
+            }
         }
 
-        await reallocateDayNormalOvertime(technicianId, logDate);
+        try {
+            await reallocateDayNormalOvertime(technicianId, logDate);
+        } catch (error) {
+            console.error('Error in reallocateDayNormalOvertime:', error);
+            // Don't fail the entire request if overtime calculation fails
+        }
         
         if (report && (report.work_completed || report.has_bottleneck)) {
             if (report.has_bottleneck && report.bottleneck_category === 'technical_complexity') {
@@ -965,8 +1002,13 @@ router.put('/:id', requireAuth, async (req, res) => {
         const normalLimit = getNormalLimitForDate(logDate);
         const normalUsed = otherDayLogs.reduce((sum, e) => sum + Number(e.normal_hours || 0), 0);
         const normalRemaining = Math.max(0, normalLimit - normalUsed);
-        const normalHours = Math.min(newHours, normalRemaining);
+        const normalHours = Math.max(0, Math.min(newHours, normalRemaining));
         const overtimeHours = Math.max(0, newHours - normalHours);
+
+        // ✅ Validate calculated overtime values
+        if (normalHours < 0 || overtimeHours < 0) {
+            return res.status(400).json({ error: 'Invalid normal/overtime hours calculated' });
+        }
 
         const prevHours = Number(existing.hours_logged || 0);
         const prevApproved = Number(existing.approved_hours || 0);
@@ -1071,6 +1113,14 @@ router.delete('/:id', requireAuth, async (req, res) => {
         const subtaskId = existing.subtask_id;
 
         await TimeLog.deleteOne({ _id: existing._id });
+
+        // ✅ Recalculate overtime after deletion
+        try {
+            await reallocateDayNormalOvertime(technicianId, existing.log_date);
+        } catch (error) {
+            console.error('Error in reallocateDayNormalOvertime after deletion:', error);
+            // Don't fail the deletion if overtime calculation fails
+        }
 
         if (!isIdle) {
             const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: jobId });
