@@ -706,6 +706,10 @@ router.post('/', requireAuth, async (req, res) => {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job' });
             }
 
+            // ✅ Define needsApproval before subtask validation
+            const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
+            const defaultStatus = needsApproval ? 'pending' : 'approved';
+
             // ✅ Only check subtask allocation if technician has subtask assignments
             if (subtaskId) {
                 const allocation = getSubtaskAllocationForTechnician(jobForCheck, subtaskId, technicianId);
@@ -744,11 +748,7 @@ router.post('/', requireAuth, async (req, res) => {
             }
         }
         
-        // ✅ Define needsApproval before it's used
-        const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
-        const defaultStatus = needsApproval ? 'pending' : 'approved';
-
-        // Continue with subtask validation for assigned subtasks
+        // Continue with time entry creation
 
         let entry;
         if (existingSameJob) {
