@@ -452,6 +452,22 @@ const reallocateDayNormalOvertime = async (technicianId, logDate) => {
             const overtimeHours = Math.max(0, ot);
             const payableHours = Math.max(0, payable);
             const overtimeMultiplier = Math.max(1, multiplier);
+            
+            // ✅ Calculate hour_category based on log type and holiday status
+            let hourCategory = null;
+            if (l.is_idle) {
+                if (holidayInfo.is_public_holiday) {
+                    hourCategory = null; // Public holiday idle time doesn't count against utilization
+                } else {
+                    hourCategory = 'utilization_loss'; // Idle time reduces utilization
+                }
+            } else {
+                if (holidayInfo.is_public_holiday) {
+                    hourCategory = null; // Public holiday work doesn't count against utilization
+                } else {
+                    hourCategory = 'productive'; // Normal productive work
+                }
+            }
 
             const needsSave =
                 Number(l.normal_hours || 0) !== normalHours ||
@@ -459,7 +475,8 @@ const reallocateDayNormalOvertime = async (technicianId, logDate) => {
                 Boolean(l.is_public_holiday) !== nextIsHoliday ||
                 (l.public_holiday_name || null) !== (nextHolidayName || null) ||
                 Number(l.overtime_multiplier || 1) !== overtimeMultiplier ||
-                Number(l.payable_hours || 0) !== payableHours;
+                Number(l.payable_hours || 0) !== payableHours ||
+                l.hour_category !== hourCategory;
 
             if (needsSave) {
                 l.normal_hours = normalHours;
@@ -468,6 +485,7 @@ const reallocateDayNormalOvertime = async (technicianId, logDate) => {
                 l.public_holiday_name = nextHolidayName || null;
                 l.overtime_multiplier = overtimeMultiplier;
                 l.payable_hours = payableHours;
+                l.hour_category = hourCategory;
                 await l.save();
             }
         } catch (logError) {

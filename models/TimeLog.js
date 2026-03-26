@@ -70,7 +70,7 @@ const timeLogSchema = new mongoose.Schema({
     },
     hour_category: {
         type: String,
-        enum: Object.values(HOUR_CATEGORIES),
+        enum: [...Object.values(HOUR_CATEGORIES), null],
         default: null,
         index: true
     },
