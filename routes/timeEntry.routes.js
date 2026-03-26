@@ -744,9 +744,11 @@ router.post('/', requireAuth, async (req, res) => {
             }
         }
         
-        // Continue with subtask validation for assigned subtasks
+        // ✅ Define needsApproval before it's used
         const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
         const defaultStatus = needsApproval ? 'pending' : 'approved';
+
+        // Continue with subtask validation for assigned subtasks
 
         let entry;
         if (existingSameJob) {
