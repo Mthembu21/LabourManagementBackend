@@ -1663,11 +1663,192 @@ router.post('/', requireAuth, async (req, res) => {
     }
 });
 
-// Keep your other routes (GET, PUT, DELETE, monthly summaries, etc.) below...
+// ==================== ESSENTIAL GET ROUTES ====================
+
+// Get all time logs (supports filtering)
+router.get('/', requireAuth, async (req, res) => {
+    try {
+        const { technician_id, category, start_date, end_date, is_idle } = req.query;
+
+        const query = { ...tenantQuery(req.tenant.supervisor_key) };
+        if (technician_id) query.technician_id = technician_id;
+        if (typeof is_idle !== 'undefined') query.is_idle = String(is_idle) === 'true';
+        if (category) query.category = category;
+
+        if (start_date || end_date) {
+            const start = start_date ? new Date(start_date) : null;
+            const end = end_date ? new Date(end_date) : null;
+            query.log_date = {};
+            if (start && !Number.isNaN(start.getTime())) {
+                start.setHours(0, 0, 0, 0);
+                query.log_date.$gte = start;
+            }
+            if (end && !Number.isNaN(end.getTime())) {
+                end.setHours(23, 59, 59, 999);
+                query.log_date.$lte = end;
+            }
+            if (!Object.keys(query.log_date).length) delete query.log_date;
+        }
+
+        if (req.session.user?.type === 'technician') {
+            query.technician_id = req.session.user.id;
+        }
+
+        const entries = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(500);
+        res.json(entries);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get time entries for a technician
+router.get('/technician/:technicianId', requireAuth, async (req, res) => {
+    try {
+        const deny = requireSelfOrSupervisor(req, res, req.params.technicianId);
+        if (deny) return;
+        const entries = await TimeLog.find({
+            ...tenantQuery(req.tenant.supervisor_key),
+            technician_id: req.params.technicianId
+        }).sort({ log_date: -1, createdAt: -1 }).limit(100);
+        res.json(entries);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get idle categories
+router.get('/idle-categories', requireAuth, async (req, res) => {
+    try {
+        res.json({
+            job_id: IDLE_JOB_ID,
+            categories: TimeLog.IDLE_CATEGORIES || []
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get a single time log
+router.get('/:id', requireAuth, async (req, res) => {
+    try {
+        const entry = await TimeLog.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id });
+        if (!entry) return res.status(404).json({ error: 'Time log not found' });
+        const deny = requireSelfOrSupervisor(req, res, entry.technician_id);
+        if (deny) return;
+        res.json(entry);
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
 
 // Make sure these helper functions are defined before they are used:
+const requireSelfOrSupervisor = (req, res, technicianId) => {
+    const user = req.session?.user;
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    if (user.type === 'supervisor') return null;
+    if (user.type === 'technician' && String(user.id) === String(technicianId)) return null;
+    return res.status(403).json({ error: 'Not allowed' });
+};
+
+const getSubtaskAllocationForTechnician = (jobDoc, subtaskId, technicianId) => {
+    const job = jobDoc?.toObject ? jobDoc.toObject() : jobDoc;
+    const subtasks = job?.subtasks || [];
+    const st = subtasks.find((s) => s && s._id && s._id.toString() === String(subtaskId));
+    if (!st) return null;
+    const assigned = st.assigned_technicians || [];
+    const a = assigned.find((x) => x.technician_id && x.technician_id.toString() === String(technicianId));
+    if (!a) return null;
+    const alloc = Number(a.allocated_hours || 0);
+    return {
+        subtask_title: st.title || null,
+        allocated_hours: Number.isFinite(alloc) ? Math.max(0, alloc) : 0
+    };
+};
+
 const reallocateDayNormalOvertime = async (technicianId, logDate) => {
-    // ... your original reallocateDayNormalOvertime function here (unchanged) ...
+    const day = TimeLog.normalizeLogDate(logDate);
+    const { start, end } = getDayRange(day);
+    const logs = await TimeLog.find({
+        technician_id: technicianId,
+        log_date: { $gte: start, $lt: end }
+    }).sort({ createdAt: 1, _id: 1 });
+
+    const normalLimit = getNormalLimitForDate(day);
+    let normalRemaining = normalLimit;
+
+    const holidayInfo = getSouthAfricanHolidayInfo(day);
+    const multiplier = getOvertimeMultiplierForDate(day);
+    const isAllOvertime = multiplier > 1 || holidayInfo.is_public_holiday || normalLimit === 0;
+
+    // ✅ Validate inputs to prevent calculation errors
+    if (!Array.isArray(logs)) {
+        console.warn('No logs found for overtime calculation');
+        return;
+    }
+
+    for (const l of logs) {
+        try {
+            const hrs = Number(l.hours_logged || 0);
+            if (hrs < 0) {
+                console.warn('Invalid hours_logged detected:', hrs);
+                continue;
+            }
+
+            const normal = isAllOvertime ? 0 : Math.max(0, Math.min(hrs, normalRemaining));
+            const ot = Math.max(0, hrs - normal);
+            normalRemaining = Math.max(0, normalRemaining - normal);
+
+            const payable = multiplier > 1 ? (hrs * multiplier) : hrs;
+            const nextIsHoliday = Boolean(holidayInfo.is_public_holiday);
+            const nextHolidayName = holidayInfo.public_holiday_name;
+
+            // ✅ Validate calculated values
+            const normalHours = Math.max(0, normal);
+            const overtimeHours = Math.max(0, ot);
+            const payableHours = Math.max(0, payable);
+            const overtimeMultiplier = Math.max(1, multiplier);
+            
+            // ✅ Calculate hour_category based on log type and holiday status
+            let hourCategory = null;
+            if (l.is_idle) {
+                if (holidayInfo.is_public_holiday) {
+                    hourCategory = null; // Public holiday idle time doesn't count against utilization
+                } else {
+                    hourCategory = 'utilization_loss'; // Idle time reduces utilization
+                }
+            } else {
+                if (holidayInfo.is_public_holiday) {
+                    hourCategory = null; // Public holiday work doesn't count against utilization
+                } else {
+                    hourCategory = 'productive'; // Normal productive work
+                }
+            }
+
+            const needsSave =
+                Number(l.normal_hours || 0) !== normalHours ||
+                Number(l.overtime_hours || 0) !== overtimeHours ||
+                Boolean(l.is_public_holiday) !== nextIsHoliday ||
+                (l.public_holiday_name || null) !== (nextHolidayName || null) ||
+                Number(l.overtime_multiplier || 1) !== overtimeMultiplier ||
+                Number(l.payable_hours || 0) !== payableHours ||
+                l.hour_category !== hourCategory;
+
+            if (needsSave) {
+                l.normal_hours = normalHours;
+                l.overtime_hours = overtimeHours;
+                l.is_public_holiday = nextIsHoliday;
+                l.public_holiday_name = nextHolidayName || null;
+                l.overtime_multiplier = overtimeMultiplier;
+                l.payable_hours = payableHours;
+                l.hour_category = hourCategory;
+                await l.save();
+            }
+        } catch (logError) {
+            console.error('Error processing log for overtime:', logError, 'Log ID:', l._id);
+            // Continue processing other logs even if one fails
+        }
+    }
 };
 
 const sumSubmittedJobHours = async ({ supervisorKey, jobId }) => {
