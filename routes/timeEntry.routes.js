@@ -636,6 +636,16 @@ router.post('/', requireAuth, async (req, res) => {
         // Prevent logging to real jobs if job has no remaining hours, enforce stage allocation,
         // and block logging past target completion date.
         if (!isIdle) {
+            // ✅ Load job first before checking assignments
+            jobForCheck = await Job.findOne({
+                ...tenantQuery(req.tenant.supervisor_key),
+                job_number: jobId
+            });
+            
+            if (!jobForCheck) {
+                return res.status(400).json({ error: 'Job not found' });
+            }
+
             // ✅ Allow logging if technician is assigned to job level (even without specific subtask)
             const jobAssignment = jobForCheck.technicians?.find(t => 
                 String(t.technician_id) === String(technicianId)
@@ -678,14 +688,17 @@ router.post('/', requireAuth, async (req, res) => {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job' });
             }
 
-            const allocation = getSubtaskAllocationForTechnician(jobForCheck, subtaskId, technicianId);
-            if (!allocation) {
-                return res.status(400).json({ error: 'Technician is not assigned to this job stage' });
+            // ✅ Only check subtask allocation if technician has subtask assignments
+            if (subtaskId) {
+                const allocation = getSubtaskAllocationForTechnician(jobForCheck, subtaskId, technicianId);
+                if (!allocation) {
+                    return res.status(400).json({ error: 'Technician is not assigned to this job stage' });
+                }
+                
+                // ✅ Allow logging even if allocated_hours is 0 (for newly assigned technicians)
+                // The supervisor will set proper allocations later
+                resolvedSubtaskTitle = allocation.subtask_title;
             }
-            
-            // ✅ Allow logging even if allocated_hours is 0 (for newly assigned technicians)
-            // The supervisor will set proper allocations later
-            resolvedSubtaskTitle = allocation.subtask_title;
         }
         
         // Continue with subtask validation for assigned subtasks
