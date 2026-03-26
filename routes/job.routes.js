@@ -16,7 +16,7 @@ const assignTechnicianToJob = async (jobId, technicianId, technicianName) => {
     
     if (!job) throw new Error("Job not found");
     
-    // Prevent duplicates
+    // Prevent duplicates at job level
     const isAlreadyAssigned = job.technicians.some(tech => 
         String(tech.technician_id) === String(technicianId)
     );
@@ -30,6 +30,10 @@ const assignTechnicianToJob = async (jobId, technicianId, technicianName) => {
             consumed_hours: 0
         });
     }
+    
+    // ✅ DON'T auto-assign to all subtasks
+    // Technicians should only be assigned to specific subtasks by supervisor
+    // This ensures they can only log hours to tasks they're actually assigned to
     
     await job.save();
     return job;

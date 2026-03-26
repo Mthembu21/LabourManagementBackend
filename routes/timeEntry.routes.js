@@ -72,6 +72,7 @@ const updateJobForApprovedDelta = async ({ supervisorKey, jobId, subtaskId, tech
     if (subtaskId) {
         const allocation = getSubtaskAllocationForTechnician(job, subtaskId, technicianId);
         const allocHours = Number(allocation?.allocated_hours || 0);
+        // ✅ Allow progress tracking even if allocated_hours is 0
         if (allocHours > 0) {
             const stageSum = await sumApprovedStageHours({ supervisorKey, jobId, subtaskId, technicianId });
             upsertSubtaskProgressForTechnician(job, subtaskId, technicianId, (stageSum / allocHours) * 100);
@@ -613,16 +614,31 @@ router.post('/', requireAuth, async (req, res) => {
         // Prevent logging to real jobs if job has no remaining hours, enforce stage allocation,
         // and block logging past target completion date.
         if (!isIdle) {
-            if (!subtaskId) {
+            // ✅ Allow logging if technician is assigned to job level (even without specific subtask)
+            const jobAssignment = jobForCheck.technicians?.find(t => 
+                String(t.technician_id) === String(technicianId)
+            );
+            
+            if (!jobAssignment) {
+                return res.status(400).json({ error: 'Technician is not assigned to this job' });
+            }
+            
+            // ✅ If technician has specific subtask assignment, require subtask_id
+            // Otherwise, allow logging to job without subtask
+            const hasSubtaskAssignment = jobForCheck.subtasks?.some(st => 
+                st.assigned_technicians?.some(a => String(a.technician_id) === String(technicianId))
+            );
+            
+            if (hasSubtaskAssignment && !subtaskId) {
                 return res.status(400).json({ error: 'subtask_id is required for job logs' });
             }
-
-            jobForCheck = await Job.findOne({
-                ...tenantQuery(req.tenant.supervisor_key),
-                job_number: jobId
-            });
-            if (!jobForCheck) {
-                return res.status(400).json({ error: 'Job not found' });
+            
+            // Skip the rest of subtask validation if no specific subtask required
+            if (!hasSubtaskAssignment) {
+                subtaskId = null; // Allow logging to job without subtask
+                // Continue to job validation logic
+            } else {
+                // Continue with subtask validation for assigned subtasks
             }
 
             if (jobForCheck.target_completion_date) {
@@ -644,9 +660,13 @@ router.post('/', requireAuth, async (req, res) => {
             if (!allocation) {
                 return res.status(400).json({ error: 'Technician is not assigned to this job stage' });
             }
+            
+            // ✅ Allow logging even if allocated_hours is 0 (for newly assigned technicians)
+            // The supervisor will set proper allocations later
             resolvedSubtaskTitle = allocation.subtask_title;
         }
-
+        
+        // Continue with subtask validation for assigned subtasks
         const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
         const defaultStatus = needsApproval ? 'pending' : 'approved';
 
@@ -668,7 +688,10 @@ router.post('/', requireAuth, async (req, res) => {
                 }
             }, 0);
             
-            if ((alreadyLogged + hoursLogged) > (allocation.allocated_hours + 1e-9)) {
+            // ✅ Allow logging even if allocated_hours is 0 (for newly assigned technicians)
+            // Supervisor will set proper allocations later
+            const allocatedHours = Number(allocation.allocated_hours || 0);
+            if (allocatedHours > 0 && (alreadyLogged + hoursLogged) > (allocatedHours + 1e-9)) {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job stage' });
             }
         }
@@ -777,30 +800,6 @@ router.post('/', requireAuth, async (req, res) => {
                     tech.consumed_hours = Number(tech.consumed_hours || 0) + deltaApproved;
                 }
 
-                // Auto-update subtask progress for this technician based on allocated stage hours
-                // (so progress is not stuck at zero unless manually edited)
-                if (subtaskId) {
-                    const allocation = getSubtaskAllocationForTechnician(job, subtaskId, technicianId);
-                    const allocHours = Number(allocation?.allocated_hours || 0);
-                    if (allocHours > 0) {
-                        if (!needsApproval) {
-                            const existingStageLogs = await TimeLog.find({
-                                ...tenantQuery(req.tenant.supervisor_key),
-                                technician_id: technicianId,
-                                job_id: jobId,
-                                subtask_id: String(subtaskId),
-                                is_idle: false
-                            });
-                            alreadyLoggedStageHours = existingStageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
-
-                            const newStageHours = alreadyLoggedStageHours + hoursLogged;
-                            const pct = (newStageHours / allocHours) * 100;
-                            upsertSubtaskProgressForTechnician(job, subtaskId, technicianId, pct);
-                        }
-                    }
-                }
-
-                const newConsumed = Number(job.consumed_hours || 0);
                 const allocated = Number(job.allocated_hours || 0);
                 const overrunHours = Math.max(0, newConsumed - allocated);
                 const progress = allocated > 0 ? (newConsumed / allocated) * 100 : 0;
@@ -946,7 +945,9 @@ router.put('/:id', requireAuth, async (req, res) => {
                 _id: { $ne: existing._id }
             });
             const alreadyLoggedStage = otherStageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
-            if ((alreadyLoggedStage + newHours) > (allocation.allocated_hours + 1e-9)) {
+            // ✅ Allow logging even if allocated_hours is 0 (for newly assigned technicians)
+            const allocatedHours = Number(allocation.allocated_hours || 0);
+            if (allocatedHours > 0 && (alreadyLoggedStage + newHours) > (allocatedHours + 1e-9)) {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job stage' });
             }
 
