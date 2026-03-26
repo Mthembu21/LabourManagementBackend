@@ -698,38 +698,37 @@ router.post('/', requireAuth, async (req, res) => {
                 // ✅ Allow logging even if allocated_hours is 0 (for newly assigned technicians)
                 // The supervisor will set proper allocations later
                 resolvedSubtaskTitle = allocation.subtask_title;
+                
+                // ✅ Check allocated hours limit (only if allocated_hours > 0)
+                const allocatedHours = Number(allocation.allocated_hours || 0);
+                if (allocatedHours > 0) {
+                    const existingStageLogs = await TimeLog.find({
+                        ...tenantQuery(req.tenant.supervisor_key),
+                        technician_id: technicianId,
+                        job_id: jobId,
+                        subtask_id: String(subtaskId),
+                        is_idle: false
+                    });
+                    
+                    // Use approved hours if approval is required, otherwise use logged hours
+                    const alreadyLogged = existingStageLogs.reduce((sum, e) => {
+                        if (needsApproval) {
+                            return sum + Number(e.approved_hours || 0);
+                        } else {
+                            return sum + Number(e.hours_logged || 0);
+                        }
+                    }, 0);
+                    
+                    if ((alreadyLogged + hoursLogged) > (allocatedHours + 1e-9)) {
+                        return res.status(400).json({ error: 'Not enough remaining hours on this job stage' });
+                    }
+                }
             }
         }
         
         // Continue with subtask validation for assigned subtasks
         const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
         const defaultStatus = needsApproval ? 'pending' : 'approved';
-
-        if (subtaskId) {
-            const existingStageLogs = await TimeLog.find({
-                ...tenantQuery(req.tenant.supervisor_key),
-                technician_id: technicianId,
-                job_id: jobId,
-                subtask_id: String(subtaskId),
-                is_idle: false
-            });
-            
-            // Use approved hours if approval is required, otherwise use logged hours
-            const alreadyLogged = existingStageLogs.reduce((sum, e) => {
-                if (needsApproval) {
-                    return sum + Number(e.approved_hours || 0);
-                } else {
-                    return sum + Number(e.hours_logged || 0);
-                }
-            }, 0);
-            
-            // ✅ Allow logging even if allocated_hours is 0 (for newly assigned technicians)
-            // Supervisor will set proper allocations later
-            const allocatedHours = Number(allocation.allocated_hours || 0);
-            if (allocatedHours > 0 && (alreadyLogged + hoursLogged) > (allocatedHours + 1e-9)) {
-                return res.status(400).json({ error: 'Not enough remaining hours on this job stage' });
-            }
-        }
 
         let entry;
         if (existingSameJob) {
