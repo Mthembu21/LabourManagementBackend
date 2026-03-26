@@ -868,6 +868,7 @@ router.post('/', requireAuth, async (req, res) => {
                 }
 
                 const allocated = Number(job.allocated_hours || 0);
+                const newConsumed = Number(job.consumed_hours || 0);
                 const overrunHours = Math.max(0, newConsumed - allocated);
                 const progress = allocated > 0 ? (newConsumed / allocated) * 100 : 0;
                 const remaining = Math.max(0, allocated - newConsumed);
