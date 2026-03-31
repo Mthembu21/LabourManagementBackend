@@ -270,66 +270,66 @@
 //     return true;
 // };
 
-// const upsertSubtaskProgressForTechnician = (jobDoc, subtaskId, technicianId, progressPct) => {
-//     const st = (jobDoc.subtasks || []).id(subtaskId);
-//     if (!st) return;
+const upsertSubtaskProgressForTechnician = (jobDoc, subtaskId, technicianId, progressPct) => {
+    const st = (jobDoc.subtasks || []).id(subtaskId);
+    if (!st) return;
 
-//     st.progress_by_technician = Array.isArray(st.progress_by_technician) ? st.progress_by_technician : [];
-//     const existing = st.progress_by_technician.find((p) => String(p?.technician_id) === String(technicianId));
-//     const pct = Math.max(0, Math.min(100, Number(progressPct || 0)));
-//     if (existing) {
-//         existing.progress_percentage = pct;
-//         if (!existing.started_at && pct > 1e-9) {
-//             existing.started_at = new Date();
-//         }
-//         if (pct >= 100 - 1e-9) {
-//             existing.completed = true;
-//             if (!existing.completed_at) existing.completed_at = new Date();
-//         } else {
-//             existing.completed = false;
-//             existing.completed_at = null;
-//         }
-//         existing.updated_at = new Date();
-//     } else {
-//         st.progress_by_technician.push({
-//             technician_id: String(technicianId),
-//             progress_percentage: pct,
-//             started_at: pct > 1e-9 ? new Date() : null,
-//             completed: pct >= 100 - 1e-9,
-//             completed_at: pct >= 100 - 1e-9 ? new Date() : null,
-//             updated_at: new Date()
-//         });
-//     }
+    st.progress_by_technician = Array.isArray(st.progress_by_technician) ? st.progress_by_technician : [];
+    const existing = st.progress_by_technician.find((p) => String(p?.technician_id) === String(technicianId));
+    const pct = Math.max(0, Math.min(100, Number(progressPct || 0)));
+    if (existing) {
+        existing.progress_percentage = pct;
+        if (!existing.started_at && pct > 1e-9) {
+            existing.started_at = new Date();
+        }
+        if (pct >= 100 - 1e-9) {
+            existing.completed = true;
+            if (!existing.completed_at) existing.completed_at = new Date();
+        } else {
+            existing.completed = false;
+            existing.completed_at = null;
+        }
+        existing.updated_at = new Date();
+    } else {
+        st.progress_by_technician.push({
+            technician_id: String(technicianId),
+            progress_percentage: pct,
+            started_at: pct > 1e-9 ? new Date() : null,
+            completed: pct >= 100 - 1e-9,
+            completed_at: pct >= 100 - 1e-9 ? new Date() : null,
+            updated_at: new Date()
+        });
+    }
     
-//     // Update overall stage status if all technicians are complete
-//     const allTechs = st.assigned_technicians || [];
-//     const allCompleted = allTechs.every(tech => {
-//         const progress = st.progress_by_technician?.find(p => String(p.technician_id) === String(tech.technician_id));
-//         return progress && progress.completed;
-//     });
+    // Update overall stage status if all technicians are complete
+    const allTechs = st.assigned_technicians || [];
+    const allCompleted = allTechs.every(tech => {
+        const progress = st.progress_by_technician?.find(p => String(p.technician_id) === String(tech.technician_id));
+        return progress && progress.completed;
+    });
     
-//     if (allCompleted) {
-//         st.status = 'completed';
-//         st.completed_at = new Date();
-//     } else if (pct > 1e-9) {
-//         st.status = 'in_progress';
-//     }
-// };
+    if (allCompleted) {
+        st.status = 'completed';
+        st.completed_at = new Date();
+    } else if (pct > 1e-9) {
+        st.status = 'in_progress';
+    }
+};
 
-// const getSubtaskAllocationForTechnician = (jobDoc, subtaskId, technicianId) => {
-//     const job = jobDoc?.toObject ? jobDoc.toObject() : jobDoc;
-//     const subtasks = job?.subtasks || [];
-//     const st = subtasks.find((s) => s && s._id && s._id.toString() === String(subtaskId));
-//     if (!st) return null;
-//     const assigned = st.assigned_technicians || [];
-//     const a = assigned.find((x) => x.technician_id && x.technician_id.toString() === String(technicianId));
-//     if (!a) return null;
-//     const alloc = Number(a.allocated_hours || 0);
-//     return {
-//         subtask_title: st.title || null,
-//         allocated_hours: Number.isFinite(alloc) ? Math.max(0, alloc) : 0
-//     };
-// };
+const getSubtaskAllocationForTechnician = (jobDoc, subtaskId, technicianId) => {
+    const job = jobDoc?.toObject ? jobDoc.toObject() : jobDoc;
+    const subtasks = job?.subtasks || [];
+    const st = subtasks.find((s) => s && s._id && s._id.toString() === String(subtaskId));
+    if (!st) return null;
+    const assigned = st.assigned_technicians || [];
+    const a = assigned.find((x) => x.technician_id && x.technician_id.toString() === String(technicianId));
+    if (!a) return null;
+    const alloc = Number(a.allocated_hours || 0);
+    return {
+        subtask_title: st.title || null,
+        allocated_hours: Number.isFinite(alloc) ? Math.max(0, alloc) : 0
+    };
+};
 
 // router.get('/idle-categories', requireAuth, async (req, res) => {
 //     try {
@@ -363,52 +363,44 @@
 //     return 1;
 // };
 
-// const computeJobStatus = (jobDoc) => {
-//     if (!jobDoc) return 'in_progress';
-//     if (jobDoc.status === 'completed') return 'completed';
+const computeJobStatus = (jobDoc) => {
+    if (!jobDoc) return 'in_progress';
+    if (jobDoc.status === 'completed') return 'completed';
 
-//     if (Boolean(jobDoc.completed)) return 'completed';
+    if (Boolean(jobDoc.completed)) return 'completed';
 
-//     const derivedPct = Number(
-//         jobDoc.aggregated_progress_percentage ?? jobDoc.progress_percentage ?? 0
-//     );
-//     if (derivedPct >= 100 - 1e-9) return 'completed';
+    const derivedPct = Number(
+        jobDoc.aggregated_progress_percentage ?? jobDoc.progress_percentage ?? 0
+    );
+    if (derivedPct >= 100 - 1e-9) return 'completed';
 
-//     // Don't auto-complete based on consumed hours alone - let stage completion handle this
-//     // This prevents jobs from disappearing when hours are partially booked
-//     const allocated = Number(jobDoc.allocated_hours || 0);
-//     const consumed = Number(jobDoc.consumed_hours || 0);
+    // Don't auto-complete based on consumed hours alone - let stage completion handle this
+    // This prevents jobs from disappearing when hours are partially booked
+    const allocated = Number(jobDoc.allocated_hours || 0);
+    const consumed = Number(jobDoc.consumed_hours || 0);
 
-//     if (allocated > 0 && consumed > allocated) return 'overrun';
+    if (allocated > 0 && consumed > allocated) return 'overrun';
 
-//     const today = normalizeDayOnly(new Date());
-//     const target = jobDoc.target_completion_date ? normalizeDayOnly(jobDoc.target_completion_date) : null;
-//     if (target && today > target) return 'at_risk';
-//     if (Number(jobDoc.bottleneck_count || 0) >= 2) return 'at_risk';
+    const today = normalizeDayOnly(new Date());
+    const target = jobDoc.target_completion_date ? normalizeDayOnly(jobDoc.target_completion_date) : null;
+    if (target && today > target) return 'at_risk';
+    if (Number(jobDoc.bottleneck_count || 0) >= 2) return 'at_risk';
 
-//     if (target && today <= target) {
-//         const remainingHours = Math.max(0, allocated - consumed);
-//         let workdaysRemaining = 0;
-//         const cursor = new Date(today);
-//         while (cursor <= target) {
-//             const day = cursor.getDay();
-//             if (day !== 0 && day !== 6) workdaysRemaining += 1;
-//             cursor.setDate(cursor.getDate() + 1);
-//         }
-//         const avgDaily = workdaysRemaining > 0 ? remainingHours / workdaysRemaining : 0;
-//         if (avgDaily > 8.5) return 'at_risk';
-//     }
+    if (target && today <= target) {
+        const remainingHours = Math.max(0, allocated - consumed);
+        let workdaysRemaining = 0;
+        const cursor = new Date(today);
+        while (cursor <= target) {
+            const day = cursor.getDay();
+            if (day !== 0 && day !== 6) workdaysRemaining += 1;
+            cursor.setDate(cursor.getDate() + 1);
+        }
+        const avgDaily = workdaysRemaining > 0 ? remainingHours / workdaysRemaining : 0;
+        if (avgDaily > 8.5) return 'at_risk';
+    }
 
-//     return 'in_progress';
-// };
-
-// const getDayRange = (dateObj) => {
-//     const start = new Date(dateObj);
-//     start.setHours(0, 0, 0, 0);
-//     const end = new Date(start);
-//     end.setDate(end.getDate() + 1);
-//     return { start, end };
-// };
+    return 'in_progress';
+};
 
 // const reallocateDayNormalOvertime = async (technicianId, logDate) => {
 //     const day = TimeLog.normalizeLogDate(logDate);
@@ -1132,68 +1124,68 @@
 
 // // Delete a time log
 // router.delete('/:id', requireAuth, async (req, res) => {
-//     try {
-//         const existing = await TimeLog.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id });
-//         if (!existing) return res.status(404).json({ error: 'Time log not found' });
-//         const deny = requireSelfOrSupervisor(req, res, existing.technician_id);
-//         if (deny) return;
+//    try {
+//        const existing = await TimeLog.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id });
+//        if (!existing) return res.status(404).json({ error: 'Time log not found' });
+//        const deny = requireSelfOrSupervisor(req, res, existing.technician_id);
+//        if (deny) return;
 
-//         const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
-//         const hours = !needsApproval ? Number(existing.hours_logged || 0) : Number(existing.approved_hours || 0);
-//         const jobId = existing.job_id;
-//         const technicianId = existing.technician_id;
-//         const isIdle = !!existing.is_idle;
-//         const subtaskId = existing.subtask_id;
+//        const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
+//        const hours = !needsApproval ? Number(existing.hours_logged || 0) : Number(existing.approved_hours || 0);
+//        const jobId = existing.job_id;
+//        const technicianId = existing.technician_id;
+//        const isIdle = !!existing.is_idle;
+//        const subtaskId = existing.subtask_id;
 
-//         await TimeLog.deleteOne({ _id: existing._id });
+//        await TimeLog.deleteOne({ _id: existing._id });
 
-//         // ✅ Recalculate overtime after deletion
-//         try {
-//             await reallocateDayNormalOvertime(technicianId, existing.log_date);
-//         } catch (error) {
-//             console.error('Error in reallocateDayNormalOvertime after deletion:', error);
-//             // Don't fail the deletion if overtime calculation fails
-//         }
+//        // ✅ Recalculate overtime after deletion
+//        try {
+//            await reallocateDayNormalOvertime(technicianId, existing.log_date);
+//        } catch (error) {
+//            console.error('Error in reallocateDayNormalOvertime after deletion:', error);
+//            // Don't fail the deletion if overtime calculation fails
+//        }
 
-//         if (!isIdle) {
-//             const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: jobId });
-//             if (job) {
-//                 job.consumed_hours = Math.max(0, Number(job.consumed_hours || 0) - hours);
-//                 const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(technicianId));
-//                 if (tech) {
-//                     tech.consumed_hours = Math.max(0, Number(tech.consumed_hours || 0) - hours);
-//                 }
+//        if (!isIdle) {
+//            const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: jobId });
+//            if (job) {
+//                job.consumed_hours = Math.max(0, Number(job.consumed_hours || 0) - hours);
+//                const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(technicianId));
+//                if (tech) {
+//                    tech.consumed_hours = Math.max(0, Number(tech.consumed_hours || 0) - hours);
+//                }
 
-//                 if (subtaskId) {
-//                     const allocation = getSubtaskAllocationForTechnician(job, subtaskId, technicianId);
-//                     const allocHours = Number(allocation?.allocated_hours || 0);
-//                     if (allocHours > 0) {
-//                         const stageLogs = await TimeLog.find({
-//                             ...tenantQuery(req.tenant.supervisor_key),
-//                             technician_id: technicianId,
-//                             job_id: jobId,
-//                             subtask_id: String(subtaskId),
-//                             is_idle: false
-//                         });
-//                         const stageSum = stageLogs.reduce((sum, e) => sum + (!needsApproval ? Number(e.hours_logged || 0) : Number(e.approved_hours || 0)), 0);
-//                         upsertSubtaskProgressForTechnician(job, subtaskId, technicianId, (stageSum / allocHours) * 100);
-//                     }
-//                 }
+//                if (subtaskId) {
+//                    const allocation = getSubtaskAllocationForTechnician(job, subtaskId, technicianId);
+//                    const allocHours = Number(allocation?.allocated_hours || 0);
+//                    if (allocHours > 0) {
+//                        const stageLogs = await TimeLog.find({
+//                            ...tenantQuery(req.tenant.supervisor_key),
+//                            technician_id: technicianId,
+//                            job_id: jobId,
+//                            subtask_id: String(subtaskId),
+//                            is_idle: false
+//                        });
+//                        const stageSum = stageLogs.reduce((sum, e) => sum + (!needsApproval ? Number(e.hours_logged || 0) : Number(e.approved_hours || 0)), 0);
+//                        upsertSubtaskProgressForTechnician(job, subtaskId, technicianId, (stageSum / allocHours) * 100);
+//                    }
+//                }
 
-//                 const allocated = Number(job.allocated_hours || 0);
-//                 const consumed = Number(job.consumed_hours || 0);
-//                 job.remaining_hours = Math.max(0, allocated - consumed);
-//                 job.overrun_hours = Math.max(0, consumed - allocated);
-//                 job.progress_percentage = allocated > 0 ? Math.min(100, (consumed / allocated) * 100) : 0;
-//                 job.status = computeJobStatus(job);
-//                 await job.save();
-//             }
-//         }
+//                const allocated = Number(job.allocated_hours || 0);
+//                const consumed = Number(job.consumed_hours || 0);
+//                job.remaining_hours = Math.max(0, allocated - consumed);
+//                job.overrun_hours = Math.max(0, consumed - allocated);
+//                job.progress_percentage = allocated > 0 ? Math.min(100, (consumed / allocated) * 100) : 0;
+//                job.status = computeJobStatus(job);
+//                await job.save();
+//            }
+//        }
 
-//         res.json({ message: 'Time log deleted' });
-//     } catch (error) {
-//         res.status(400).json({ error: error.message });
-//     }
+//        res.json({ message: 'Time log deleted' });
+//    } catch (error) {
+//        res.status(400).json({ error: error.message });
+//    }
 // });
 
 // // Monthly Hours Summary endpoints
@@ -1440,15 +1432,13 @@ const requireForemanOrManager = (req, res) => {
     if (!req.session?.user || req.session.user.type !== 'supervisor') {
         return res.status(403).json({ error: 'Supervisor access required' });
     }
-    const role = req.session.user.role || 'supervisor';
-    if (!['foreman', 'manager'].includes(role)) {
-        return res.status(403).json({ error: 'Foreman or Manager access required' });
-    }
+    // Allow any supervisor to approve (foreman approves for all workshops)
     return null;
 };
 
 const requiresApprovalForTenant = (supervisorKey) => {
-    return supervisorKey === 'pdis' || supervisorKey === 'rebuild';
+    // Require approval for all tenants to enable proper workflow
+    return true; // All tenants require approval
 };
 
 // ✅ Moved UP so it's available to all routes
@@ -1493,9 +1483,45 @@ router.get('/approvals/pending', requireSupervisor, async (req, res) => {
             return res.json([]);
         }
 
-        // ... your existing pending approvals code (unchanged) ...
-        // (I'll keep it short here - keep your original code for this route)
-        res.json([]); // placeholder - replace with your full logic
+        const { start_date, end_date, technician_id } = req.query;
+        
+        // Build query based on user role
+        let query = {
+            ...tenantQuery(req.tenant.supervisor_key),
+            approval_status: 'pending'
+        };
+        
+        // Filter based on user role and supervisor_key
+        const userRole = req.session.user.role || 'supervisor';
+        const userSupervisorKey = req.session.user.supervisor_key;
+        
+        if (userRole === 'foreman' || userRole === 'manager') {
+            // Foreman sees PDIS and Rebuild approvals (not Component)
+            query.supervisor_key = { $in: ['pdis', 'rebuild'] };
+        } else {
+            // Component supervisors see only their own workshop approvals
+            query.supervisor_key = userSupervisorKey;
+        }
+        
+        // Add date filters if provided
+        if (start_date || end_date) {
+            query.log_date = {};
+            if (start_date) query.log_date.$gte = new Date(start_date);
+            if (end_date) query.log_date.$lte = new Date(end_date);
+        }
+        
+        // Add technician filter if provided
+        if (technician_id) {
+            query.technician_id = technician_id;
+        }
+
+        const pendingLogs = await TimeLog.find(query)
+            .populate('technician_id', 'name email')
+            .sort({ log_date: -1, createdAt: -1 });
+
+        // Ensure we always return an array
+        const responseArray = Array.isArray(pendingLogs) ? pendingLogs : [];
+        res.json(responseArray);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -1503,18 +1529,274 @@ router.get('/approvals/pending', requireSupervisor, async (req, res) => {
 
 // Approve time log
 router.put('/:id/approve', requireSupervisor, async (req, res) => {
-    // ... your existing approve logic (unchanged) ...
+    try {
+        const deny = requireForemanOrManager(req, res);
+        if (deny) return;
+
+        if (!requiresApprovalForTenant(req.tenant.supervisor_key)) {
+            return res.status(400).json({ error: 'Approval workflow is not enabled for this workshop' });
+        }
+
+        const { approval_note, approved_hours } = req.body;
+        
+        const existing = await TimeLog.findOne({ 
+            ...tenantQuery(req.tenant.supervisor_key), 
+            _id: req.params.id 
+        });
+        
+        if (!existing) return res.status(404).json({ error: 'Time log not found' });
+        if (existing.approval_status !== 'pending') {
+            return res.status(400).json({ error: 'Time log is not pending approval' });
+        }
+
+        // Validate approved hours
+        const submittedHours = Number(existing.hours_logged || 0);
+        const hoursToApprove = Number(approved_hours || submittedHours);
+        
+        if (hoursToApprove < 0) {
+            return res.status(400).json({ error: 'Approved hours cannot be negative' });
+        }
+        
+        if (hoursToApprove > submittedHours) {
+            return res.status(400).json({ error: `Cannot approve more than submitted hours (${submittedHours}h)` });
+        }
+
+        // Update approval status with partial approval support
+        existing.approval_status = 'approved';
+        existing.approved_hours = hoursToApprove;
+        existing.approved_by = req.session.user.name || req.session.user.email;
+        existing.approved_at = new Date();
+        existing.approval_note = approval_note || '';
+        
+        // Add note about partial approval if applicable
+        if (hoursToApprove < submittedHours) {
+            existing.approval_note = (existing.approval_note || '') + 
+                ` (Partial approval: ${hoursToApprove}h of ${submittedHours}h submitted)`;
+        }
+        
+        await existing.save();
+
+        // Update job consumed hours for non-idle entries
+        if (!existing.is_idle) {
+            const job = await Job.findOne({ 
+                ...tenantQuery(req.tenant.supervisor_key), 
+                job_number: existing.job_id 
+            });
+            
+            if (job) {
+                const currentConsumed = Number(job.consumed_hours || 0);
+                const approvedHours = Number(existing.approved_hours || 0); // Use approved hours, not submitted
+                
+                // Find if there are other pending entries for this job
+                const otherPending = await TimeLog.find({
+                    ...tenantQuery(req.tenant.supervisor_key),
+                    job_id: existing.job_id,
+                    technician_id: existing.technician_id,
+                    approval_status: 'pending',
+                    _id: { $ne: existing._id }
+                });
+                
+                const totalPendingHours = otherPending.reduce((sum, entry) => 
+                    sum + Number(entry.hours_logged || 0), 0
+                );
+                
+                // Update consumed hours with approved amount only
+                job.consumed_hours = currentConsumed + approvedHours + totalPendingHours;
+                await job.save();
+            }
+        }
+
+        res.json({ 
+            message: 'Time log approved successfully',
+            timeLog: existing 
+        });
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
 });
 
 // Decline time log
 router.put('/:id/decline', requireSupervisor, async (req, res) => {
-    // ... your existing decline logic (unchanged) ...
+    try {
+        const deny = requireForemanOrManager(req, res);
+        if (deny) return;
+
+        if (!requiresApprovalForTenant(req.tenant.supervisor_key)) {
+            return res.status(400).json({ error: 'Approval workflow is not enabled for this workshop' });
+        }
+
+        const { approval_note } = req.body;
+        
+        const existing = await TimeLog.findOne({ 
+            ...tenantQuery(req.tenant.supervisor_key), 
+            _id: req.params.id 
+        });
+        
+        if (!existing) return res.status(404).json({ error: 'Time log not found' });
+        if (existing.approval_status !== 'pending') {
+            return res.status(400).json({ error: 'Time log is not pending approval' });
+        }
+
+        // Update decline status
+        existing.approval_status = 'declined';
+        existing.approved_by = req.session.user.name || req.session.user.email;
+        existing.approved_at = new Date();
+        existing.approval_note = approval_note || '';
+        
+        await existing.save();
+
+        res.json({ 
+            message: 'Time log declined successfully',
+            timeLog: existing 
+        });
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
 });
 
 // ==================== CREATE TIME LOG (FIXED) ====================
 router.post('/', requireAuth, async (req, res) => {
     try {
-        const { timeLog, report, timeEntry } = req.body;
+        const { timeLog, report, timeEntry, batch } = req.body;
+        
+        // Handle batch creation for leave entries
+        if (batch && Array.isArray(batch)) {
+            const results = [];
+            for (const item of batch) {
+                const { timeLog: itemTimeLog, report: itemReport } = item;
+                const payload = itemTimeLog || {};
+                
+                const technicianId = payload?.technician_id;
+                const jobId = payload?.job_id;
+                const subtaskId = payload?.subtask_id ?? null;
+                const entryDate = payload?.log_date 
+                    ? new Date(payload.log_date) 
+                    : (payload?.date ? new Date(payload.date) : null);
+
+                const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
+                const defaultStatus = needsApproval ? 'pending' : 'approved';
+
+                if (req.session.user?.type === 'technician' && String(req.session.user.id) !== String(technicianId)) {
+                    continue; // Skip invalid entries in batch
+                }
+
+                const hoursLogged = Number(
+                    typeof payload?.hours_logged !== 'undefined' 
+                        ? payload.hours_logged 
+                        : (payload?.productive_hours || 0)
+                );
+
+                const isIdle = typeof payload?.is_idle !== 'undefined'
+                    ? !!payload.is_idle
+                    : (jobId === IDLE_JOB_ID);
+
+                const category = payload?.category ?? null;
+                const categoryDetail = typeof payload?.category_detail === 'string' ? payload.category_detail : '';
+                const isLeave = !!payload?.is_leave;
+
+                // Validations
+                if (!technicianId) continue;
+                if (!jobId) continue;
+                if (!entryDate || Number.isNaN(entryDate.getTime())) continue;
+                if (hoursLogged <= 0) continue;
+
+                if (isIdle) {
+                    if (jobId !== IDLE_JOB_ID) continue;
+                    if (!category || !(TimeLog.IDLE_CATEGORIES || []).includes(category)) continue;
+                    if (category === 'Other' && !String(categoryDetail || '').trim()) continue;
+                }
+
+                const logDate = TimeLog.normalizeLogDate(entryDate);
+                const { start, end } = getDayRange(logDate);
+
+                // Check daily total
+                const existingDayLogs = await TimeLog.find({
+                    ...tenantQuery(req.tenant.supervisor_key),
+                    technician_id: technicianId,
+                    log_date: { $gte: start, $lt: end }
+                });
+
+                const totalForDay = existingDayLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+                if ((totalForDay + hoursLogged) > 24 + 1e-9) continue;
+
+                const existingSameJob = existingDayLogs.find((e) => 
+                    String(e.job_id) === String(jobId) && 
+                    String(e.subtask_id || '') === String(subtaskId || '')
+                );
+
+                const deltaHours = hoursLogged;
+                let resolvedSubtaskTitle = null;
+                let jobForCheck = null;
+
+                if (!isIdle) {
+                    jobForCheck = await Job.findOne({
+                        ...tenantQuery(req.tenant.supervisor_key),
+                        job_number: jobId
+                    });
+
+                    if (!jobForCheck) continue;
+
+                    const consumedForJob = needsApproval 
+                        ? await sumSubmittedJobHours({ supervisorKey: req.tenant.supervisor_key, jobId })
+                        : Number(jobForCheck.consumed_hours || 0);
+
+                    const remaining = Math.max(0, Number(jobForCheck.allocated_hours || 0) - consumedForJob);
+                    if (deltaHours > remaining) continue;
+                }
+
+                // Create or merge entry
+                let entry;
+                if (existingSameJob) {
+                    existingSameJob.hours_logged += hoursLogged;
+                    existingSameJob.is_idle = isIdle;
+                    existingSameJob.category = isIdle ? category : null;
+                    existingSameJob.category_detail = isIdle ? String(categoryDetail || '') : '';
+                    existingSameJob.subtask_id = isIdle ? null : String(subtaskId);
+                    existingSameJob.subtask_title = isIdle ? null : resolvedSubtaskTitle;
+                    existingSameJob.is_leave = isLeave;
+
+                    if (!needsApproval) {
+                        existingSameJob.approval_status = 'approved';
+                        existingSameJob.approved_hours = existingSameJob.hours_logged;
+                    } else {
+                        existingSameJob.approval_status = 'pending';
+                    }
+                    entry = await existingSameJob.save();
+                } else {
+                    entry = new TimeLog({
+                        supervisor_key: req.tenant.supervisor_key,
+                        technician_id: technicianId,
+                        job_id: jobId,
+                        subtask_id: isIdle ? null : String(subtaskId),
+                        subtask_title: isIdle ? null : resolvedSubtaskTitle,
+                        hours_logged: hoursLogged,
+                        log_date: logDate,
+                        category: isIdle ? category : null,
+                        category_detail: isIdle ? String(categoryDetail || '') : '',
+                        is_idle: isIdle,
+                        is_leave: isLeave,
+                        approval_status: defaultStatus,
+                        approved_hours: defaultStatus === 'approved' ? hoursLogged : 0
+                    });
+                    await entry.save();
+                }
+
+                // Recalculate overtime
+                await reallocateDayNormalOvertime(technicianId, logDate).catch(console.error);
+
+                // Update job consumed hours (non-idle only)
+                if (!isIdle && jobForCheck) {
+                    const deltaApproved = needsApproval ? 0 : deltaHours;
+                    jobForCheck.consumed_hours = Number(jobForCheck.consumed_hours || 0) + deltaApproved;
+                    await jobForCheck.save();
+                }
+
+                results.push(entry);
+            }
+            return res.status(201).json(results);
+        }
+
+        // Single entry creation (existing logic)
         const payload = timeLog || timeEntry || {};
 
         const technicianId = payload?.technician_id;
@@ -1543,6 +1825,7 @@ router.post('/', requireAuth, async (req, res) => {
 
         const category = payload?.category ?? null;
         const categoryDetail = typeof payload?.category_detail === 'string' ? payload.category_detail : '';
+        const isLeave = !!payload?.is_leave;
 
         // Validations
         if (!technicianId) return res.status(400).json({ error: 'technician_id is required' });
@@ -1616,6 +1899,7 @@ router.post('/', requireAuth, async (req, res) => {
             existingSameJob.category_detail = isIdle ? String(categoryDetail || '') : '';
             existingSameJob.subtask_id = isIdle ? null : String(subtaskId);
             existingSameJob.subtask_title = isIdle ? null : resolvedSubtaskTitle;
+            existingSameJob.is_leave = isLeave;
 
             if (!needsApproval) {
                 existingSameJob.approval_status = 'approved';
@@ -1636,6 +1920,7 @@ router.post('/', requireAuth, async (req, res) => {
                 category: isIdle ? category : null,
                 category_detail: isIdle ? String(categoryDetail || '') : '',
                 is_idle: isIdle,
+                is_leave: isLeave,
                 approval_status: defaultStatus,
                 approved_hours: defaultStatus === 'approved' ? hoursLogged : 0
             });
@@ -1751,21 +2036,6 @@ const requireSelfOrSupervisor = (req, res, technicianId) => {
     return res.status(403).json({ error: 'Not allowed' });
 };
 
-const getSubtaskAllocationForTechnician = (jobDoc, subtaskId, technicianId) => {
-    const job = jobDoc?.toObject ? jobDoc.toObject() : jobDoc;
-    const subtasks = job?.subtasks || [];
-    const st = subtasks.find((s) => s && s._id && s._id.toString() === String(subtaskId));
-    if (!st) return null;
-    const assigned = st.assigned_technicians || [];
-    const a = assigned.find((x) => x.technician_id && x.technician_id.toString() === String(technicianId));
-    if (!a) return null;
-    const alloc = Number(a.allocated_hours || 0);
-    return {
-        subtask_title: st.title || null,
-        allocated_hours: Number.isFinite(alloc) ? Math.max(0, alloc) : 0
-    };
-};
-
 const reallocateDayNormalOvertime = async (technicianId, logDate) => {
     const day = TimeLog.normalizeLogDate(logDate);
     const { start, end } = getDayRange(day);
@@ -1795,11 +2065,25 @@ const reallocateDayNormalOvertime = async (technicianId, logDate) => {
                 continue;
             }
 
-            const normal = isAllOvertime ? 0 : Math.max(0, Math.min(hrs, normalRemaining));
-            const ot = Math.max(0, hrs - normal);
-            normalRemaining = Math.max(0, normalRemaining - normal);
+            // ✅ Handle leave entries - no overtime calculation for leave
+            const isLeave = Boolean(l.is_leave);
+            let normal, ot, payable, overtimeMultiplier;
+            
+            if (isLeave) {
+                // Leave entries should not have overtime
+                normal = hrs;
+                ot = 0;
+                payable = hrs;
+                overtimeMultiplier = 1;
+            } else {
+                // Normal overtime calculation for non-leave entries
+                normal = isAllOvertime ? 0 : Math.max(0, Math.min(hrs, normalRemaining));
+                ot = Math.max(0, hrs - normal);
+                normalRemaining = Math.max(0, normalRemaining - normal);
+                payable = multiplier > 1 ? (hrs * multiplier) : hrs;
+                overtimeMultiplier = Math.max(1, multiplier);
+            }
 
-            const payable = multiplier > 1 ? (hrs * multiplier) : hrs;
             const nextIsHoliday = Boolean(holidayInfo.is_public_holiday);
             const nextHolidayName = holidayInfo.public_holiday_name;
 
@@ -1807,11 +2091,13 @@ const reallocateDayNormalOvertime = async (technicianId, logDate) => {
             const normalHours = Math.max(0, normal);
             const overtimeHours = Math.max(0, ot);
             const payableHours = Math.max(0, payable);
-            const overtimeMultiplier = Math.max(1, multiplier);
             
             // ✅ Calculate hour_category based on log type and holiday status
             let hourCategory = null;
-            if (l.is_idle) {
+            if (isLeave) {
+                // Leave entries don't count against utilization
+                hourCategory = null;
+            } else if (l.is_idle) {
                 if (holidayInfo.is_public_holiday) {
                     hourCategory = null; // Public holiday idle time doesn't count against utilization
                 } else {
@@ -1860,5 +2146,71 @@ const sumSubmittedJobHours = async ({ supervisorKey, jobId }) => {
     });
     return logs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
 };
+
+// Delete a time log
+router.delete('/:id', requireAuth, async (req, res) => {
+    try {
+        const existing = await TimeLog.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id });
+        if (!existing) return res.status(404).json({ error: 'Time log not found' });
+        const deny = requireSelfOrSupervisor(req, res, existing.technician_id);
+        if (deny) return;
+
+        const needsApproval = requiresApprovalForTenant(req.tenant.supervisor_key);
+        const hours = !needsApproval ? Number(existing.hours_logged || 0) : Number(existing.approved_hours || 0);
+        const jobId = existing.job_id;
+        const technicianId = existing.technician_id;
+        const isIdle = !!existing.is_idle;
+        const subtaskId = existing.subtask_id;
+
+        await TimeLog.deleteOne({ _id: existing._id });
+
+        // ✅ Recalculate overtime after deletion
+        try {
+            await reallocateDayNormalOvertime(technicianId, existing.log_date);
+        } catch (error) {
+            console.error('Error in reallocateDayNormalOvertime after deletion:', error);
+            // Don't fail deletion if overtime calculation fails
+        }
+
+        if (!isIdle) {
+            const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: jobId });
+            if (job) {
+                job.consumed_hours = Math.max(0, Number(job.consumed_hours || 0) - hours);
+                const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(technicianId));
+                if (tech) {
+                    tech.consumed_hours = Math.max(0, Number(tech.consumed_hours || 0) - hours);
+                }
+
+                if (subtaskId) {
+                    const allocation = getSubtaskAllocationForTechnician(job, subtaskId, technicianId);
+                    const allocHours = Number(allocation?.allocated_hours || 0);
+                    if (allocHours > 0) {
+                        const stageLogs = await TimeLog.find({
+                            ...tenantQuery(req.tenant.supervisor_key),
+                            technician_id: technicianId,
+                            job_id: jobId,
+                            subtask_id: String(subtaskId),
+                            is_idle: false
+                        });
+                        const stageSum = stageLogs.reduce((sum, e) => sum + (!needsApproval ? Number(e.hours_logged || 0) : Number(e.approved_hours || 0)), 0);
+                        upsertSubtaskProgressForTechnician(job, subtaskId, technicianId, (stageSum / allocHours) * 100);
+                    }
+                }
+
+                const allocated = Number(job.allocated_hours || 0);
+                const consumed = Number(job.consumed_hours || 0);
+                job.remaining_hours = Math.max(0, allocated - consumed);
+                job.overrun_hours = Math.max(0, consumed - allocated);
+                job.progress_percentage = allocated > 0 ? Math.min(100, (consumed / allocated) * 100) : 0;
+                job.status = computeJobStatus(job);
+                await job.save();
+            }
+        }
+
+        res.json({ message: 'Time log deleted' });
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
 
 module.exports = router;

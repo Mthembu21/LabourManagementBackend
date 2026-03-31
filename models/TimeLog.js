@@ -68,6 +68,11 @@ const timeLogSchema = new mongoose.Schema({
         default: false,
         index: true
     },
+    is_leave: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
     hour_category: {
         type: String,
         enum: [...Object.values(HOUR_CATEGORIES), null],
@@ -155,6 +160,11 @@ timeLogSchema.statics.normalizeLogDate = (dateObj) => {
 timeLogSchema.statics.determineHourCategory = (entry) => {
     if (!entry.is_idle) {
         return HOUR_CATEGORIES.PRODUCTIVE;
+    }
+    
+    // If explicitly marked as leave, categorize as unavailable
+    if (entry.is_leave) {
+        return HOUR_CATEGORIES.UNAVAILABLE;
     }
     
     // For idle entries, categorize based on category
@@ -264,7 +274,10 @@ timeLogSchema.statics.calculateDailyProductivity = async (supervisorKey, technic
                     break;
                 case HOUR_CATEGORIES.UNAVAILABLE:
                     unavailableHours += hours;
-                    if (entry.category === 'Training') {
+                    // Track leave specifically
+                    if (entry.is_leave || entry.category === 'Leave') {
+                        // Leave is already counted in unavailableHours
+                    } else if (entry.category === 'Training') {
                         trainingHours += hours;
                     }
                     break;
