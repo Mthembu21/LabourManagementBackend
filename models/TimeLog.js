@@ -131,6 +131,22 @@ const timeLogSchema = new mongoose.Schema({
     approval_note: {
         type: String,
         default: ''
+    },
+    // Temporary assignment context for cross-supervisor tracking
+    temporary_assignment_id: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'TemporaryAssignment',
+        default: null
+    },
+    is_temporary_assignment: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
+    original_supervisor_key: {
+        type: String,
+        enum: ['component', 'rebuild', 'pdis'],
+        default: null
     }
 }, {
     timestamps: true
@@ -274,7 +290,7 @@ timeLogSchema.statics.calculateDailyProductivity = async (supervisorKey, technic
                     break;
                 case HOUR_CATEGORIES.UNAVAILABLE:
                     unavailableHours += hours;
-                    // Track leave specifically
+                    // Track specific categories
                     if (entry.is_leave || entry.category === 'Leave') {
                         // Leave is already counted in unavailableHours
                     } else if (entry.category === 'Training') {
@@ -302,11 +318,19 @@ timeLogSchema.statics.calculateDailyProductivity = async (supervisorKey, technic
         const totalLogged = productiveHours + idleHours + housekeepingHours + trainingHours;
         const productivity = totalLogged > 0 ? (productiveHours / totalLogged) * 100 : 0;
         
-        // Calculate percentages for tooltip breakdowns (all based on total logged hours)
-        const productivePercentage = totalLogged > 0 ? (productiveHours / totalLogged) * 100 : 0;
-        const idlePercentage = totalLogged > 0 ? (idleHours / totalLogged) * 100 : 0;
-        const housekeepingPercentage = totalLogged > 0 ? (housekeepingHours / totalLogged) * 100 : 0;
-        const trainingPercentage = totalLogged > 0 ? (trainingHours / totalLogged) * 100 : 0;
+        // Effective productivity: Only consider job hours (productive work) with lunch deduction
+        const lunchHoursDeduction = productiveHours > 0 ? 1 : 0; // Only deduct lunch if there's actual job work
+        const effectiveJobHours = productiveHours; // Only job hours count for effective productivity
+        
+        // Calculate effective productivity based only on job hours vs total available work time
+        const totalAvailableWorkTime = productiveHours + idleHours + housekeepingHours + lunchHoursDeduction;
+        const effectiveProductivity = totalAvailableWorkTime > 0 ? (productiveHours / totalAvailableWorkTime) * 100 : 0;
+        
+        // Calculate percentages for tooltip breakdowns (all based on effective total after lunch deduction)
+        const productivePercentage = totalAvailableWorkTime > 0 ? (productiveHours / totalAvailableWorkTime) * 100 : 0;
+        const idlePercentage = totalAvailableWorkTime > 0 ? (idleHours / totalAvailableWorkTime) * 100 : 0;
+        const housekeepingPercentage = totalAvailableWorkTime > 0 ? (housekeepingHours / totalAvailableWorkTime) * 100 : 0;
+        const trainingPercentage = totalAvailableWorkTime > 0 ? (trainingHours / totalAvailableWorkTime) * 100 : 0;
         
         dailyData.push({
             date: day,
@@ -318,14 +342,23 @@ timeLogSchema.statics.calculateDailyProductivity = async (supervisorKey, technic
             trainingHours,
             idleHours,
             housekeepingHours,
-            dailyProductivePercentage: productivity,
-            dailyUtilizationPercentage: utilization,
-            breakdown: {
-                productivePercentage: Math.max(0, Math.min(100, productivePercentage)),
-                idlePercentage: Math.max(0, Math.min(100, idlePercentage)),
-                housekeepingPercentage: Math.max(0, Math.min(100, housekeepingPercentage)),
-                trainingPercentage: Math.max(0, Math.min(100, trainingPercentage))
-            }
+            utilization,
+            productivity,
+            effectiveProductivity,
+            lunchHoursDeduction,
+            effectiveJobHours,
+            totalAvailableWorkTime,
+            productivePercentage,
+            idlePercentage,
+            housekeepingPercentage,
+            trainingPercentage,
+            timeEntries: entries.map(entry => ({
+                date: entry.log_date,
+                jobId: entry.job_id,
+                hours: entry.hours_logged,
+                isProductive: !entry.is_idle,
+                category: entry.category
+            }))
         });
     }
     

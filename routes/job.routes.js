@@ -80,6 +80,63 @@ function isJobFullyCompleteByAssignments(jobDoc) {
     return true;
 }
 
+function isLastRemainingTask(jobDoc, completedSubtaskId) {
+    if (!jobDoc || !completedSubtaskId) return false;
+    
+    let totalRemainingTasks = 0;
+    let completedTasksCount = 0;
+    
+    for (const st of (jobDoc.subtasks || [])) {
+        for (const a of (st.assigned_technicians || [])) {
+            const techId = a?.technician_id;
+            if (!techId) continue;
+            
+            const p = (st.progress_by_technician || []).find((x) => String(x?.technician_id) === String(techId));
+            const pct = Number(p?.progress_percentage || 0);
+            const isCompleted = Boolean(p?.completed) || pct >= 100 - 1e-9;
+            
+            if (isCompleted) {
+                completedTasksCount++;
+            } else {
+                totalRemainingTasks++;
+            }
+        }
+    }
+    
+    // If this was the last remaining task, allow job completion
+    return totalRemainingTasks <= 1;
+}
+
+function countTotalTasks(jobDoc) {
+    if (!jobDoc) return 0;
+    let totalTasks = 0;
+    
+    for (const st of (jobDoc.subtasks || [])) {
+        for (const a of (st.assigned_technicians || [])) {
+            if (a?.technician_id) totalTasks++;
+        }
+    }
+    return totalTasks;
+}
+
+function countCompletedTasks(jobDoc) {
+    if (!jobDoc) return 0;
+    let completedTasks = 0;
+    
+    for (const st of (jobDoc.subtasks || [])) {
+        for (const a of (st.assigned_technicians || [])) {
+            if (!a?.technician_id) continue;
+            
+            const p = (st.progress_by_technician || []).find((x) => String(x?.technician_id) === String(a?.technician_id));
+            const pct = Number(p?.progress_percentage || 0);
+            const isCompleted = Boolean(p?.completed) || pct >= 100 - 1e-9;
+            
+            if (isCompleted) completedTasks++;
+        }
+    }
+    return completedTasks;
+}
+
 // Manual stage completion (technician override)
 router.put('/by-job/:jobNumber/subtasks/:subtaskId/complete', requireAuth, async (req, res) => {
     try {
@@ -118,8 +175,22 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId/complete', requireAuth, async
             });
         }
 
-        // Rule A: job is completed when all assigned stages are completed
-        if (job.status !== 'completed' && isJobFullyCompleteByAssignments(job)) {
+        // Update job progress based on completed tasks (but don't auto-complete job)
+        const allocated = Number(job.allocated_hours || 0);
+        const consumed = Number(job.consumed_hours || 0);
+        const remainingHours = allocated - consumed;
+        
+        // Calculate progress based on completed tasks vs total tasks
+        const totalTasks = countTotalTasks(job);
+        const completedTasks = countCompletedTasks(job);
+        const taskBasedProgress = totalTasks > 0 ? (completedTasks / totalTasks) * 100 : 0;
+        
+        // Update job progress to reflect task completions
+        job.progress_percentage = Math.max(taskBasedProgress, job.progress_percentage || 0);
+        job.remaining_hours = Math.max(0, remainingHours);
+        
+        // Only complete job if there are no remaining hours OR if this was the last remaining task
+        if (job.status !== 'completed' && (remainingHours <= 0 || isLastRemainingTask(job, req.params.subtaskId))) {
             job.status = 'completed';
             job.progress_percentage = 100;
             job.remaining_hours = 0;
