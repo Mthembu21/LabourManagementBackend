@@ -15,7 +15,8 @@ const TIME_CATEGORIES = {
     PRODUCTIVE: 'productive',           // Job/work order booked hours (value-adding)
     NON_PRODUCTIVE: 'non_productive',  // Training, housekeeping, admin, waiting for parts, unbookable work
     IDLE: 'idle',                      // No work assigned (capacity loss)
-    NOT_AVAILABLE: 'not_available'     // Leave, sick
+    NOT_AVAILABLE: 'not_available',    // Leave, sick
+    UTILIZATION_LOSS: 'utilization_loss' // Legacy compatibility for existing data
 };
 
 // Backward compatibility alias for deployment safety
@@ -201,6 +202,16 @@ timeLogSchema.statics.determineTimeCategory = (entry) => {
         return TIME_CATEGORIES.NON_PRODUCTIVE;
     }
     
+    // Handle legacy utilization_loss - map to appropriate category
+    if (entry.hour_category === 'utilization_loss') {
+        // If it's utilization_loss and not idle, classify as non-productive
+        if (!entry.is_idle) {
+            return TIME_CATEGORIES.NON_PRODUCTIVE;
+        }
+        // If it's utilization_loss and idle, classify as idle
+        return TIME_CATEGORIES.IDLE;
+    }
+    
     // Idle: No work assigned (capacity loss)
     return TIME_CATEGORIES.IDLE;
 };
@@ -237,6 +248,14 @@ timeLogSchema.statics.calculateOperationalMetrics = async (supervisorKey, techni
                 break;
             case TIME_CATEGORIES.NOT_AVAILABLE:
                 notAvailableHours += hours;
+                break;
+            case TIME_CATEGORIES.UTILIZATION_LOSS:
+                // Legacy compatibility - map utilization_loss to appropriate category
+                if (!entry.is_idle) {
+                    nonProductiveHours += hours;
+                } else {
+                    idleHours += hours;
+                }
                 break;
         }
     });
@@ -340,6 +359,17 @@ timeLogSchema.statics.calculateDailyOperationalMetrics = async (supervisorKey, t
                     break;
                 case TIME_CATEGORIES.NOT_AVAILABLE:
                     notAvailableHours += hours;
+                    break;
+                case TIME_CATEGORIES.UTILIZATION_LOSS:
+                    // Legacy compatibility - map utilization_loss to appropriate category
+                    if (!entry.is_idle) {
+                        nonProductiveHours += hours;
+                        if (entry.category === 'Housekeeping') {
+                            housekeepingHours += hours;
+                        }
+                    } else {
+                        idleHours += hours;
+                    }
                     break;
             }
         });
