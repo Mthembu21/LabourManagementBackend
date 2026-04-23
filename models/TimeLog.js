@@ -10,11 +10,12 @@ const IDLE_CATEGORIES = [
     'Other'
 ];
 
-// Hour categories for utilization calculation
-const HOUR_CATEGORIES = {
-    PRODUCTIVE: 'productive',
-    UNAVAILABLE: 'unavailable', // Training, Leave, Sick - reduces available hours but not utilization
-    UTILIZATION_LOSS: 'utilization_loss' // Idle Time, Housekeeping - reduces utilization
+// Strict time classification system for operational planning
+const TIME_CATEGORIES = {
+    PRODUCTIVE: 'productive',           // Job/work order booked hours (value-adding)
+    NON_PRODUCTIVE: 'non_productive',  // Training, housekeeping, admin, waiting for parts, unbookable work
+    IDLE: 'idle',                      // No work assigned (capacity loss)
+    NOT_AVAILABLE: 'not_available'     // Leave, sick
 };
 
 const timeLogSchema = new mongoose.Schema({
@@ -147,6 +148,13 @@ const timeLogSchema = new mongoose.Schema({
         type: String,
         enum: ['component', 'rebuild', 'pdis', null],
         default: null
+    },
+    time_category: {
+        type: String,
+        enum: Object.values(TIME_CATEGORIES),
+        required: true,
+        default: 'productive',
+        index: true
     }
 }, {
     timestamps: true
@@ -172,29 +180,29 @@ timeLogSchema.statics.normalizeLogDate = (dateObj) => {
     return d;
 };
 
-// Determine hour category based on entry data
-timeLogSchema.statics.determineHourCategory = (entry) => {
-    if (!entry.is_idle) {
-        return HOUR_CATEGORIES.PRODUCTIVE;
+// Determine time category based on entry data (strict classification)
+timeLogSchema.statics.determineTimeCategory = (entry) => {
+    // Productive: Job/work order booked hours (not idle)
+    if (!entry.is_idle && entry.job_id && entry.category !== 'Housekeeping') {
+        return TIME_CATEGORIES.PRODUCTIVE;
     }
     
-    // If explicitly marked as leave, categorize as unavailable
-    if (entry.is_leave) {
-        return HOUR_CATEGORIES.UNAVAILABLE;
+    // Not Available: Leave, Sick
+    if (entry.is_leave || ['Leave', 'Sick'].includes(entry.category)) {
+        return TIME_CATEGORIES.NOT_AVAILABLE;
     }
     
-    // For idle entries, categorize based on category
-    const category = entry.category;
-    if (['Training', 'Leave', 'Sick'].includes(category)) {
-        return HOUR_CATEGORIES.UNAVAILABLE;
+    // Non-Productive: Training, Housekeeping, admin, waiting for parts, unbookable work
+    if (['Training', 'Housekeeping', 'Admin', 'Waiting for Parts', 'Site Work'].includes(entry.category)) {
+        return TIME_CATEGORIES.NON_PRODUCTIVE;
     }
     
-    // Housekeeping and other idle categories are utilization loss
-    return HOUR_CATEGORIES.UTILIZATION_LOSS;
+    // Idle: No work assigned (capacity loss)
+    return TIME_CATEGORIES.IDLE;
 };
 
-// Calculate utilization for a technician within a date range
-timeLogSchema.statics.calculateUtilization = async (supervisorKey, technicianId, startDate, endDate) => {
+// Calculate utilization and productivity metrics using new operational principles
+timeLogSchema.statics.calculateOperationalMetrics = async (supervisorKey, technicianId, startDate, endDate, totalContractedHours = null) => {
     const TimeLog = mongoose.model('TimeLog');
     
     const entries = await TimeLog.find({
@@ -202,50 +210,76 @@ timeLogSchema.statics.calculateUtilization = async (supervisorKey, technicianId,
         technician_id: technicianId,
         log_date: { $gte: startDate, $lte: endDate }
     });
-    
-    let totalHours = 0;
+
+    // Calculate hours by category
     let productiveHours = 0;
-    let unavailableHours = 0;
-    let utilizationLossHours = 0;
-    
+    let nonProductiveHours = 0;
+    let idleHours = 0;
+    let notAvailableHours = 0;
+
     entries.forEach(entry => {
         const hours = Number(entry.hours_logged || 0);
-        totalHours += hours;
-        
-        const category = TimeLog.determineHourCategory(entry);
+        const category = entry.time_category || TimeLog.determineTimeCategory(entry);
         
         switch (category) {
-            case HOUR_CATEGORIES.PRODUCTIVE:
+            case TIME_CATEGORIES.PRODUCTIVE:
                 productiveHours += hours;
                 break;
-            case HOUR_CATEGORIES.UNAVAILABLE:
-                unavailableHours += hours;
+            case TIME_CATEGORIES.NON_PRODUCTIVE:
+                nonProductiveHours += hours;
                 break;
-            case HOUR_CATEGORIES.UTILIZATION_LOSS:
-                utilizationLossHours += hours;
+            case TIME_CATEGORIES.IDLE:
+                idleHours += hours;
+                break;
+            case TIME_CATEGORIES.NOT_AVAILABLE:
+                notAvailableHours += hours;
                 break;
         }
     });
-    
-    const availableHours = totalHours - unavailableHours;
-    const utilization = availableHours > 0 ? (productiveHours / availableHours) * 100 : 0;
-    
+
+    // Total Contracted Hours (provided or calculated)
+    if (totalContractedHours === null) {
+        // Default to sum of all logged hours if not provided
+        totalContractedHours = productiveHours + nonProductiveHours + idleHours + notAvailableHours;
+    }
+
+    // Adjusted Available Hours = Total Contracted Hours - Not Available Hours
+    const adjustedAvailableHours = totalContractedHours - notAvailableHours;
+
+    // A. Utilization % = Productive Hours / Adjusted Available Hours * 100
+    const utilization = adjustedAvailableHours > 0 ? (productiveHours / adjustedAvailableHours) * 100 : 0;
+
+    // B. Productivity % = Productive Hours / (Productive Hours + Non-Productive Hours) * 100
+    const workingHours = productiveHours + nonProductiveHours;
+    const productivity = workingHours > 0 ? (productiveHours / workingHours) * 100 : 0;
+
+    // C. Idle % = Idle Hours / Adjusted Available Hours * 100
+    const idlePercentage = adjustedAvailableHours > 0 ? (idleHours / adjustedAvailableHours) * 100 : 0;
+
+    // D. Total Productivity (Finance View) = Productive Hours / Total Contracted Hours * 100
+    const totalProductivity = totalContractedHours > 0 ? (productiveHours / totalContractedHours) * 100 : 0;
+
     return {
-        totalHours,
         productiveHours,
-        unavailableHours,
-        utilizationLossHours,
-        availableHours,
-        utilization: Math.max(0, Math.min(100, utilization))
+        nonProductiveHours,
+        idleHours,
+        notAvailableHours,
+        totalContractedHours,
+        adjustedAvailableHours,
+        workingHours,
+        utilization,
+        productivity,
+        idlePercentage,
+        totalProductivity
     };
 };
 
-// Calculate daily productive percentages for a technician with detailed breakdowns
-timeLogSchema.statics.calculateDailyProductivity = async (supervisorKey, technicianId, startDate, endDate) => {
+// Calculate daily operational metrics using new TimeCategory system
+timeLogSchema.statics.calculateDailyOperationalMetrics = async (supervisorKey, technicianId, startDate, endDate) => {
     const TimeLog = mongoose.model('TimeLog');
     const { eachDayOfInterval } = require('date-fns');
     
-    console.log('🔍 Backend calculateDailyProductivity called:', {
+    console.log('🔍 Backend calculateDailyOperationalMetrics called:', {
         supervisorKey,
         technicianId,
         startDate,
@@ -269,89 +303,91 @@ timeLogSchema.statics.calculateDailyProductivity = async (supervisorKey, technic
         
         console.log(`🔍 Day ${day.toISOString()} has ${entries.length} entries for technician ${technicianId}`);
         
-        // Categorize hours
+        // Categorize hours using new TimeCategory system
         let totalHours = 0;
         let productiveHours = 0;
-        let unavailableHours = 0;
-        let utilizationLossHours = 0;
-        let trainingHours = 0;
+        let nonProductiveHours = 0;
         let idleHours = 0;
+        let notAvailableHours = 0;
+        let trainingHours = 0;
         let housekeepingHours = 0;
         
         entries.forEach(entry => {
             const hours = Number(entry.hours_logged || 0);
             totalHours += hours;
             
-            const category = TimeLog.determineHourCategory(entry);
+            const category = entry.time_category || TimeLog.determineTimeCategory(entry);
             
             switch (category) {
-                case HOUR_CATEGORIES.PRODUCTIVE:
+                case TIME_CATEGORIES.PRODUCTIVE:
                     productiveHours += hours;
                     break;
-                case HOUR_CATEGORIES.UNAVAILABLE:
-                    unavailableHours += hours;
+                case TIME_CATEGORIES.NON_PRODUCTIVE:
+                    nonProductiveHours += hours;
                     // Track specific categories
-                    if (entry.is_leave || entry.category === 'Leave') {
-                        // Leave is already counted in unavailableHours
-                    } else if (entry.category === 'Training') {
+                    if (entry.category === 'Training') {
                         trainingHours += hours;
+                    } else if (entry.category === 'Housekeeping') {
+                        housekeepingHours += hours;
                     }
                     break;
-                case HOUR_CATEGORIES.UTILIZATION_LOSS:
-                    utilizationLossHours += hours;
-                    if (entry.category === 'Housekeeping') {
-                        housekeepingHours += hours;
-                    } else {
-                        idleHours += hours;
-                    }
+                case TIME_CATEGORIES.IDLE:
+                    idleHours += hours;
+                    break;
+                case TIME_CATEGORIES.NOT_AVAILABLE:
+                    notAvailableHours += hours;
                     break;
             }
         });
         
-        // ✅ Available Hours = Productive + Idle + Housekeeping (exclude training & leave)
-        const availableHours = productiveHours + idleHours + housekeepingHours;
+        // New operational principles for daily calculations
+        const totalContractedHours = totalHours; // All logged hours for this day
+        const adjustedAvailableHours = totalContractedHours - notAvailableHours;
         
-        // ✅ Utilization = Productive / Available * 100 (exclude training & leave)
-        const utilization = availableHours > 0 ? (productiveHours / availableHours) * 100 : 0;
+        // A. Utilization % = Productive Hours / Adjusted Available Hours * 100
+        const utilization = adjustedAvailableHours > 0 ? (productiveHours / adjustedAvailableHours) * 100 : 0;
         
-        // ✅ Productivity = Productive / Total Logged * 100 (includes all recorded hours)
-        const totalLogged = productiveHours + idleHours + housekeepingHours + trainingHours;
-        const productivity = totalLogged > 0 ? (productiveHours / totalLogged) * 100 : 0;
+        // B. Productivity % = Productive Hours / (Productive Hours + Non-Productive Hours) * 100
+        const workingHours = productiveHours + nonProductiveHours;
+        const productivity = workingHours > 0 ? (productiveHours / workingHours) * 100 : 0;
         
-        // Effective productivity: Only consider job hours (productive work) with lunch deduction
-        const lunchHoursDeduction = productiveHours > 0 ? 1 : 0; // Only deduct lunch if there's actual job work
-        const effectiveJobHours = productiveHours; // Only job hours count for effective productivity
+        // C. Idle % = Idle Hours / Adjusted Available Hours * 100
+        const idlePercentage = adjustedAvailableHours > 0 ? (idleHours / adjustedAvailableHours) * 100 : 0;
         
-        // Calculate effective productivity based only on job hours vs total available work time
-        const totalAvailableWorkTime = productiveHours + idleHours + housekeepingHours + lunchHoursDeduction;
-        const effectiveProductivity = totalAvailableWorkTime > 0 ? (productiveHours / totalAvailableWorkTime) * 100 : 0;
+        // D. Total Productivity (Finance View) = Productive Hours / Total Contracted Hours * 100
+        const totalProductivity = totalContractedHours > 0 ? (productiveHours / totalContractedHours) * 100 : 0;
         
-        // Calculate percentages for tooltip breakdowns (all based on effective total after lunch deduction)
-        const productivePercentage = totalAvailableWorkTime > 0 ? (productiveHours / totalAvailableWorkTime) * 100 : 0;
-        const idlePercentage = totalAvailableWorkTime > 0 ? (idleHours / totalAvailableWorkTime) * 100 : 0;
-        const housekeepingPercentage = totalAvailableWorkTime > 0 ? (housekeepingHours / totalAvailableWorkTime) * 100 : 0;
-        const trainingPercentage = totalAvailableWorkTime > 0 ? (trainingHours / totalAvailableWorkTime) * 100 : 0;
+        // Legacy compatibility - keep old variable names for existing frontend code
+        const availableHours = adjustedAvailableHours;
+        const effectiveProductivity = productivity;
         
         dailyData.push({
             date: day,
             totalHours,
             productiveHours,
-            availableHours,
-            unavailableHours,
-            utilizationLossHours,
-            trainingHours,
+            nonProductiveHours,
             idleHours,
-            housekeepingHours,
+            notAvailableHours,
+            totalContractedHours,
+            adjustedAvailableHours,
+            workingHours,
             utilization,
             productivity,
-            effectiveProductivity,
-            lunchHoursDeduction,
-            effectiveJobHours,
-            totalAvailableWorkTime,
-            productivePercentage,
             idlePercentage,
-            housekeepingPercentage,
-            trainingPercentage,
+            totalProductivity,
+            // Legacy compatibility for existing frontend
+            availableHours,
+            unavailableHours: notAvailableHours,
+            utilizationLossHours: idleHours,
+            trainingHours,
+            housekeepingHours,
+            effectiveProductivity: productivity,
+            lunchHoursDeduction: 0,
+            effectiveJobHours: productiveHours,
+            totalAvailableWorkTime: adjustedAvailableHours,
+            productivePercentage: adjustedAvailableHours > 0 ? (productiveHours / adjustedAvailableHours) * 100 : 0,
+            housekeepingPercentage: adjustedAvailableHours > 0 ? (housekeepingHours / adjustedAvailableHours) * 100 : 0,
+            trainingPercentage: adjustedAvailableHours > 0 ? (trainingHours / adjustedAvailableHours) * 100 : 0,
             timeEntries: entries.map(entry => ({
                 date: entry.log_date,
                 jobId: entry.job_id,
