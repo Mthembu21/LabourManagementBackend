@@ -17,7 +17,7 @@ const tenantQuery = (supervisorKey) => ({
 });
 
 // GET /api/metrics/utilization?techId=&dateRange=
-router.get('/utilization', requireAuth, async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
     try {
         const { techId, dateRange } = req.query;
         const supervisorKey = req.tenant.supervisor_key;
@@ -68,7 +68,7 @@ router.get('/utilization', requireAuth, async (req, res) => {
 });
 
 // GET /api/metrics/utilization/daily?techId=&dateRange=
-router.get('/utilization/daily', requireAuth, async (req, res) => {
+router.get('/daily', requireAuth, async (req, res) => {
     try {
         const { techId, dateRange } = req.query;
         const supervisorKey = req.tenant.supervisor_key;
@@ -109,7 +109,7 @@ router.get('/utilization/daily', requireAuth, async (req, res) => {
 });
 
 // GET /api/metrics/utilization/batch?dateRange=
-router.get('/utilization/batch', requireAuth, async (req, res) => {
+router.get('/batch', requireAuth, async (req, res) => {
     try {
         const { dateRange } = req.query;
         const supervisorKey = req.tenant.supervisor_key;
