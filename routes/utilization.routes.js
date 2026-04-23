@@ -158,4 +158,13 @@ router.get('/batch', requireAuth, async (req, res) => {
     }
 });
 
+// Test route to verify utilization routes are working
+router.get('/test', (req, res) => {
+    res.json({ 
+        message: 'Utilization routes are working',
+        timestamp: new Date().toISOString(),
+        routes: ['/', '/daily', '/batch', '/test']
+    });
+});
+
 module.exports = router;
