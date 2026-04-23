@@ -18,6 +18,9 @@ const TIME_CATEGORIES = {
     NOT_AVAILABLE: 'not_available'     // Leave, sick
 };
 
+// Backward compatibility alias for deployment safety
+const HOUR_CATEGORIES = TIME_CATEGORIES;
+
 const timeLogSchema = new mongoose.Schema({
     supervisor_key: {
         type: String,
@@ -76,7 +79,7 @@ const timeLogSchema = new mongoose.Schema({
     },
     hour_category: {
         type: String,
-        enum: [...Object.values(TIME_CATEGORIES), null],
+        enum: [...Object.values(HOUR_CATEGORIES), null],
         default: null,
         index: true
     },
@@ -172,6 +175,7 @@ timeLogSchema.index(
 );
 
 timeLogSchema.statics.IDLE_CATEGORIES = IDLE_CATEGORIES;
+timeLogSchema.statics.HOUR_CATEGORIES = HOUR_CATEGORIES;
 timeLogSchema.statics.TIME_CATEGORIES = TIME_CATEGORIES;
 
 timeLogSchema.statics.normalizeLogDate = (dateObj) => {
