@@ -76,7 +76,7 @@ const timeLogSchema = new mongoose.Schema({
     },
     hour_category: {
         type: String,
-        enum: [...Object.values(HOUR_CATEGORIES), null],
+        enum: [...Object.values(TIME_CATEGORIES), null],
         default: null,
         index: true
     },
@@ -172,7 +172,7 @@ timeLogSchema.index(
 );
 
 timeLogSchema.statics.IDLE_CATEGORIES = IDLE_CATEGORIES;
-timeLogSchema.statics.HOUR_CATEGORIES = HOUR_CATEGORIES;
+timeLogSchema.statics.TIME_CATEGORIES = TIME_CATEGORIES;
 
 timeLogSchema.statics.normalizeLogDate = (dateObj) => {
     const d = new Date(dateObj);
