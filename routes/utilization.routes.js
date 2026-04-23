@@ -99,6 +99,8 @@ router.get('/daily', requireAuth, async (req, res) => {
 // GET /api/metrics/utilization/batch?dateRange=
 router.get('/batch', requireAuth, async (req, res) => {
     try {
+        console.log('BATCH ENDPOINT CALLED - req.query:', req.query);
+        console.log('BATCH ENDPOINT CALLED - req.tenant:', req.tenant);
         const { dateRange } = req.query;
         const supervisorKey = req.tenant.supervisor_key;
         
