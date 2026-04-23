@@ -206,6 +206,64 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId/complete', requireAuth, async
     }
 });
 
+// Reopen completed job
+router.put('/by-job/:jobNumber/reopen', requireAuth, async (req, res) => {
+    try {
+        const technicianId = req.body?.technician_id || req.session?.user?.id;
+        const reason = req.body?.reason || 'Job mistakenly marked as completed - has remaining hours';
+        
+        if (!technicianId) return res.status(400).json({ error: 'technician_id is required' });
+
+        const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: req.params.jobNumber });
+        if (!job) return res.status(404).json({ error: 'Job not found' });
+
+        if (job.status !== 'completed') {
+            return res.status(400).json({ error: 'Job is not completed' });
+        }
+
+        const isSupervisor = req.session?.user?.type === 'supervisor';
+        if (!isSupervisor) {
+            // Check if technician is assigned to this job
+            const isAssigned = (job.technicians || []).some(t => String(t?.technician_id) === String(technicianId)) ||
+                (job.subtasks || []).some(st => 
+                    (st.assigned_technicians || []).some(a => String(a?.technician_id) === String(technicianId))
+                );
+            if (!isAssigned) return res.status(403).json({ error: 'Not assigned to this job' });
+        }
+
+        // Check if job has remaining hours
+        const allocated = Number(job.allocated_hours || 0);
+        const consumed = Number(job.consumed_hours || 0);
+        if (allocated <= consumed) {
+            return res.status(400).json({ error: 'No remaining hours to reopen job' });
+        }
+
+        // Reopen the job
+        job.status = 'active';
+        job.progress_percentage = Math.max(0, ((consumed / allocated) * 100) - 5); // Slightly reduce progress
+        job.remaining_hours = allocated - consumed;
+        job.actual_completion_date = null;
+        job.total_hours_utilized = null;
+
+        // Add re-open history
+        if (!job.reopen_history) job.reopen_history = [];
+        job.reopen_history.push({
+            reopened_by: technicianId,
+            reopened_at: new Date(),
+            reason: reason,
+            previous_status: 'completed',
+            consumed_hours_at_reopen: consumed,
+            allocated_hours_at_reopen: allocated
+        });
+
+        await job.save();
+        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        res.json(enriched[0]);
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
 function normalizeDayOnly(d) {
     const dt = new Date(d);
     dt.setHours(0, 0, 0, 0);
