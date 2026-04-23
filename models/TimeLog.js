@@ -145,7 +145,7 @@ const timeLogSchema = new mongoose.Schema({
     },
     original_supervisor_key: {
         type: String,
-        enum: ['component', 'rebuild', 'pdis'],
+        enum: ['component', 'rebuild', 'pdis', null],
         default: null
     }
 }, {
