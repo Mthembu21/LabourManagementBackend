@@ -2,19 +2,7 @@ const express = require('express');
 const router = express.Router();
 const TimeLog = require('../models/TimeLog');
 const { startOfMonth, endOfMonth, parseISO } = require('date-fns');
-
-// Middleware for authentication
-const requireAuth = (req, res, next) => {
-    if (!req.session || !req.session.user) {
-        return res.status(401).json({ error: 'Authentication required' });
-    }
-    next();
-};
-
-// Helper function to get tenant query
-const tenantQuery = (supervisorKey) => ({
-    supervisor_key: supervisorKey
-});
+const { requireAuth, tenantQuery } = require('../middleware/auth');
 
 // GET /api/metrics/utilization?techId=&dateRange=
 router.get('/', requireAuth, async (req, res) => {
@@ -125,7 +113,7 @@ router.get('/batch', requireAuth, async (req, res) => {
         
         // Get all technicians for this supervisor
         const Technician = require('../models/Technician');
-        const technicians = await Technician.find({ supervisor_key: supervisorKey });
+        const technicians = await Technician.find(tenantQuery(supervisorKey));
         
         // Calculate metrics for all technicians
         const batchMetrics = [];
