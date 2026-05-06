@@ -90,6 +90,10 @@ app.use("/api/metrics", utilizationRoutes);
 const fixCrossSupervisorJobsRoutes = require('./routes/fixCrossSupervisorJobs.routes');
 app.use("/api/fix", fixCrossSupervisorJobsRoutes);
 
+// Add existing job fix route
+const fixExistingJobRoutes = require('./routes/fixExistingJob');
+app.use("/api/fix-existing-job", fixExistingJobRoutes);
+
 // Health check
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
