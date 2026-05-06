@@ -741,15 +741,38 @@ router.get('/', requireAuth, async (req, res) => {
     }
 });
 
-// Get jobs for a technician
+// Get jobs for a technician - include cross-supervisor globally allocated jobs
 router.get('/technician/:technicianId', requireAuth, async (req, res) => {
     try {
         const technicianId = req.params.technicianId;
+        
+        // First, find the technician to get their supervisor's tenant
+        const technician = await Technician.findOne({ technician_id: technicianId });
+        if (!technician) {
+            return res.status(404).json({ error: 'Technician not found' });
+        }
+        
+        // Find jobs assigned to this technician from ANY supervisor (for global allocations)
+        // Plus jobs from their own supervisor's tenant
         const jobs = await Job.find({
-            ...tenantQuery(req.tenant.supervisor_key),
             $or: [
-                { 'technicians.technician_id': technicianId },
-                { 'subtasks.assigned_technicians.technician_id': technicianId }
+                // Jobs from technician's own supervisor
+                {
+                    ...tenantQuery(req.tenant.supervisor_key),
+                    $or: [
+                        { 'technicians.technician_id': technicianId },
+                        { 'subtasks.assigned_technicians.technician_id': technicianId }
+                    ]
+                },
+                // Jobs from other supervisors (global allocations)
+                {
+                    'technicians.technician_id': technicianId,
+                    supervisor_key: { $ne: req.tenant.supervisor_key }
+                },
+                {
+                    'subtasks.assigned_technicians.technician_id': technicianId,
+                    supervisor_key: { $ne: req.tenant.supervisor_key }
+                }
             ]
         }).sort({ createdAt: -1 }).limit(200);
         const enriched = await enrichJobsWithTimeLogProgress(jobs, req.tenant.supervisor_key);
