@@ -86,6 +86,10 @@ app.use("/api/archives", archiveRoutes);
 app.use("/api/overview", overviewRoutes);
 app.use("/api/metrics", utilizationRoutes);
 
+// Add cross-supervisor job fix route
+const fixCrossSupervisorJobsRoutes = require('./routes/fixCrossSupervisorJobs.routes');
+app.use("/api/fix", fixCrossSupervisorJobsRoutes);
+
 // Health check
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
