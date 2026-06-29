@@ -160,6 +160,12 @@ const jobSchema = new mongoose.Schema({
         default: 0,
         min: 0
     },
+    // NEW: Complexity Category
+    complexity_category: {
+        type: String,
+        enum: ['Low', 'Medium', 'High', 'Critical'],
+        default: 'Medium'
+    },
     start_date: Date,
     target_completion_date: Date,
     actual_completion_date: Date,

@@ -1,6 +1,7 @@
 // Authentication middleware
 const tenantToAccessKey = (supervisorKey) => {
     if (supervisorKey === 'component') return 'components';
+    if (supervisorKey === 'kathu') return 'components';
     if (supervisorKey === 'pdis') return 'pdi';
     if (supervisorKey === 'rebuild') return 'rebuild';
     return null;

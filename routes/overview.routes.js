@@ -3,6 +3,7 @@ const router = express.Router();
 
 const Job = require('../models/Job');
 const TimeLog = require('../models/TimeLog');
+const DayEntry = require('../models/DayEntry');
 const { requireAuth, tenantQuery } = require('../middleware/auth');
 
 const getMonthRange = (monthStr) => {
@@ -57,27 +58,44 @@ router.get('/workshop', requireAuth, requireManager, async (req, res) => {
             }
             const logs = await TimeLog.find(logQuery).limit(20000);
 
+            // Build set of absence day technician-date combinations (approved AttendanceRecord only)
+            const absenceDays = new Set();
+            const absenceQuery = {
+                supervisor_key: k,
+                status: 'approved',
+                attendance_type: { $in: ['leave', 'sick'] }
+            };
+            if (range) {
+                absenceQuery.date = { $gte: range.start, $lt: range.end };
+            }
+
+            const absenceRecords = await AttendanceRecord.find(absenceQuery).select({ technician_id: 1, date: 1 });
+            absenceRecords.forEach(r => {
+                absenceDays.add(`${r.technician_id}_${new Date(r.date).toDateString()}`);
+            });
+
+
             const jobsOpened = jobs.length;
             const hoursConsumed = logs.reduce((sum, l) => sum + Number(l.hours_logged || 0), 0);
 
-            // ✅ Categorize hours properly for utilization calculation
+            // Categorize hours properly for utilization calculation
             const productiveHours = logs.reduce((sum, l) => {
                 if (l.is_idle) return sum;
                 if (l.category === 'Training' || l.category === 'Leave') return sum;
                 return sum + Number(l.hours_logged || 0);
             }, 0);
-            
-            const idleHours = logs.reduce((sum, l) => 
-                l.is_idle && l.category !== 'Training' && l.category !== 'Leave' 
-                    ? sum + Number(l.hours_logged || 0) 
+
+            const idleHours = logs.reduce((sum, l) =>
+                l.is_idle && l.category !== 'Training' && l.category !== 'Leave'
+                    ? sum + Number(l.hours_logged || 0)
                     : sum, 0);
-            
-            const housekeepingHours = logs.reduce((sum, l) => 
-                l.category === 'Housekeeping' 
-                    ? sum + Number(l.hours_logged || 0) 
+
+            const housekeepingHours = logs.reduce((sum, l) =>
+                l.category === 'Housekeeping'
+                    ? sum + Number(l.hours_logged || 0)
                     : sum, 0);
-            
-            // ✅ Available Hours = Productive + Idle + Housekeeping (exclude training & leave)
+
+            // Available Hours = Productive + Idle + Housekeeping (exclude training & leave)
             const availableHours = productiveHours + idleHours + housekeepingHours;
             const utilization = availableHours > 0 ? Math.max(0, Math.min(100, (productiveHours / availableHours) * 100)) : 0;
 
@@ -87,17 +105,17 @@ router.get('/workshop', requireAuth, requireManager, async (req, res) => {
                 jobs_opened: jobsOpened,
                 hours_consumed: hoursConsumed,
                 productive_hours: productiveHours,
-                non_productive_hours: idleHours + housekeepingHours, // For backwards compatibility
+                non_productive_hours: idleHours + housekeepingHours,
                 utilization_percentage: utilization
             };
 
             totalJobsOpened += jobsOpened;
             totalHoursConsumed += hoursConsumed;
             totalProductive += productiveHours;
-            totalNonProductive += idleHours + housekeepingHours; // Use the same logic as above
+            totalNonProductive += idleHours + housekeepingHours;
         }
 
-        // ✅ Overall utilization should use the same formula: Productive / (Productive + Idle + Housekeeping)
+        // Overall utilization should use the same formula: Productive / (Productive + Idle + Housekeeping)
         // Note: totalNonProductive now contains idle + housekeeping from the loop above
         const utilizationAll = totalProductive > 0
             ? Math.max(0, Math.min(100, (totalProductive / (totalProductive + totalNonProductive)) * 100))

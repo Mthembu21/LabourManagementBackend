@@ -1,8 +1,16 @@
 const express = require('express');
 const router = express.Router();
-const TimeLog = require('../models/TimeLog');
+// Utilization KPIs are computed by the centralized backend KPI engine
+// (TimeLog operational metrics contain conflicting historical formulas)
+
 const { startOfMonth, endOfMonth, parseISO } = require('date-fns');
 const { requireAuth, tenantQuery } = require('../middleware/auth');
+const KPICalculator = require('../services/kpiCalculator');
+
+
+
+
+
 
 // GET /api/metrics/utilization?techId=&dateRange=
 router.get('/', requireAuth, async (req, res) => {
@@ -23,13 +31,11 @@ router.get('/', requireAuth, async (req, res) => {
         const startDate = startOfMonth(parseISO(`${year}-${month}-01`));
         const endDate = endOfMonth(startDate);
         
-        // Calculate operational metrics using new formulas
-        const metrics = await TimeLog.calculateOperationalMetrics(
-            supervisorKey,
-            techId,
-            startDate,
-            endDate
-        );
+        // Use centralized backend KPI engine for utilization/productivity
+        // NOTE: KPI engine methods are added in kpiCalculator.js.
+        const metrics = await KPICalculator.calculateMonthlyUtilizationProductivity(supervisorKey, techId, startDate, endDate);
+
+
         
         res.json({
             success: true,
@@ -74,13 +80,10 @@ router.get('/daily', requireAuth, async (req, res) => {
         const startDate = startOfMonth(parseISO(`${year}-${month}-01`));
         const endDate = endOfMonth(startDate);
         
-        // Calculate daily operational metrics
-        const dailyMetrics = await TimeLog.calculateDailyOperationalMetrics(
-            supervisorKey,
-            techId,
-            startDate,
-            endDate
-        );
+        // Use centralized backend KPI engine for daily utilization/productivity
+        const dailyMetrics = await KPICalculator.calculateDailyUtilizationProductivity(supervisorKey, techId, startDate, endDate);
+
+
         
         res.json({
             success: true,
@@ -120,13 +123,8 @@ router.get('/batch', requireAuth, async (req, res) => {
         // Calculate metrics for all technicians
         const batchMetrics = [];
         for (const tech of technicians) {
-            const metrics = await TimeLog.calculateOperationalMetrics(
-                supervisorKey,
-                tech._id,
-                startDate,
-                endDate
-            );
-            
+            const metrics = await KPICalculator.calculateMonthlyUtilizationProductivity(supervisorKey, tech._id, startDate, endDate);
+
             batchMetrics.push({
                 technicianId: tech._id,
                 technicianName: tech.name,

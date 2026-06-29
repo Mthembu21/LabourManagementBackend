@@ -110,57 +110,130 @@ router.post('/temporary-assignment', requireSupervisor, async (req, res) => {
             return res.status(404).json({ error: 'Technician not found' });
         }
         
-        // Check if technician already has an active temporary assignment
+        // If an active assignment already exists for this technician to THIS workshop,
+        // renew it instead of blocking.  A supervisor should always be able to re-add
+        // or extend a temporary assignment without having to wait for the old one to expire.
+        const effectiveDuration = duration_hours || 8;
+        const newExpiresAt = new Date(Date.now() + effectiveDuration * 60 * 60 * 1000);
+
         const existingAssignment = await TemporaryAssignment.findOne({
             technician_id,
+            temporary_supervisor_key: req.tenant.supervisor_key,
             status: 'active',
             expires_at: { $gt: new Date() }
         });
-        
+
+        let savedAssignment;
         if (existingAssignment) {
-            return res.status(400).json({ 
-                error: 'Technician already has an active temporary assignment',
-                existingAssignment 
+            // Renew: extend duration and reason instead of creating a duplicate
+            existingAssignment.duration_hours = effectiveDuration;
+            existingAssignment.expires_at = newExpiresAt;
+            existingAssignment.reason = reason.trim();
+            existingAssignment.assigned_at = new Date();
+            savedAssignment = await existingAssignment.save();
+            console.log('Renewed existing temporary assignment:', savedAssignment._id);
+        } else {
+            // Create a fresh temporary assignment record
+            console.log('Creating temporary assignment with data:', {
+                technician_id,
+                original_supervisor_key: technician.supervisor_key,
+                temporary_supervisor_key: req.tenant.supervisor_key,
+                duration_hours: effectiveDuration,
+                reason: reason.trim()
             });
+
+            const temporaryAssignment = new TemporaryAssignment({
+                technician_id,
+                original_supervisor_key: technician.supervisor_key,
+                temporary_supervisor_key: req.tenant.supervisor_key,
+                duration_hours: effectiveDuration,
+                reason: reason.trim(),
+                assigned_at: new Date(),
+                expires_at: newExpiresAt
+            });
+
+            savedAssignment = await temporaryAssignment.save();
         }
-        
-        // Create temporary assignment record in database
-        console.log('Creating temporary assignment with data:', {
-            technician_id,
-            original_supervisor_key: technician.supervisor_key,
-            temporary_supervisor_key: req.tenant.supervisor_key,
-            duration_hours: duration_hours || 8,
-            reason: reason.trim()
-        });
-        
-        const temporaryAssignment = new TemporaryAssignment({
-            technician_id,
-            original_supervisor_key: technician.supervisor_key,
-            temporary_supervisor_key: req.tenant.supervisor_key,
-            duration_hours: duration_hours || 8,
-            reason: reason.trim(),
-            assigned_at: new Date(),
-            expires_at: new Date(Date.now() + ((duration_hours || 8) * 60 * 60 * 1000))
-        });
-        
-        const savedAssignment = await temporaryAssignment.save();
         console.log('Saved temporary assignment:', savedAssignment);
         
+        // =========================
+        // Sync technician into jobs
+        // =========================
+        // TechnicianPortal decides what jobs a technician has via Job.technicians[]
+        // and Job.subtasks[].assigned_technicians[].
+        // Temporary assignment alone is not enough.
+        try {
+            const Job = require('../models/Job');
+
+            // Decide which jobs should gain this technician.
+            // Rule: add to jobs that belong to the supervisor who is doing the temporary assignment
+            // and that currently do not already include this technician.
+            const jobsToUpdate = await Job.find({
+                supervisor_key: req.tenant.supervisor_key,
+                'technicians.technician_id': { $ne: technician_id }
+            });
+
+            for (const job of jobsToUpdate) {
+                const techName = technician.name;
+
+                // Add at job level
+                job.technicians = job.technicians || [];
+                job.technicians.push({
+                    technician_id,
+                    technician_name: techName,
+                    confirmed_by_technician: false,
+                    confirmed_date: null,
+                    consumed_hours: 0
+                });
+
+                // Add at subtasks level
+                job.subtasks = job.subtasks || [];
+                for (const st of job.subtasks) {
+                    st.assigned_technicians = Array.isArray(st.assigned_technicians) ? st.assigned_technicians : [];
+                    st.progress_by_technician = Array.isArray(st.progress_by_technician) ? st.progress_by_technician : [];
+
+                    const alreadyAssigned = st.assigned_technicians.some(a => String(a.technician_id) === String(technician_id));
+                    if (alreadyAssigned) continue;
+
+                    st.assigned_technicians.push({
+                        technician_id,
+                        technician_name: techName,
+                        allocated_hours: st.allocated_hours || 0
+                    });
+
+                    // initialize progress row
+                    st.progress_by_technician.push({
+                        technician_id,
+                        progress_percentage: 0,
+                        started_at: null,
+                        completed: false,
+                        completed_at: null,
+                        updated_at: new Date()
+                    });
+                }
+
+                await job.save();
+            }
+        } catch (syncError) {
+            // Don't fail the API request if job syncing fails; temp assignment must still be created.
+            console.error('Temporary assignment job sync failed:', syncError);
+        }
+
         // Populate technician details for response
-        await temporaryAssignment.populate('technician_id', 'name employee_id employeeNumber department');
-        
+        await savedAssignment.populate('technician_id', 'name employee_id employeeNumber department');
+
         res.json({
             message: 'Technician temporarily assigned successfully',
-            assignment: temporaryAssignment,
+            assignment: savedAssignment,
             technician: {
                 ...technician.toObject(),
                 isTemporary: true,
                 originalSupervisor: technician.supervisor_key,
                 temporaryAssignment: {
-                    id: temporaryAssignment._id,
-                    expires_at: temporaryAssignment.expires_at,
-                    duration_hours: temporaryAssignment.duration_hours,
-                    reason: temporaryAssignment.reason
+                    id: savedAssignment._id,
+                    expires_at: savedAssignment.expires_at,
+                    duration_hours: savedAssignment.duration_hours,
+                    reason: savedAssignment.reason
                 }
             }
         });

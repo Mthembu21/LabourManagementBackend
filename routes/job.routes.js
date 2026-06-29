@@ -189,8 +189,10 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId/complete', requireAuth, async
         job.progress_percentage = Math.max(taskBasedProgress, job.progress_percentage || 0);
         job.remaining_hours = Math.max(0, remainingHours);
         
-        // Only complete job if there are no remaining hours OR if this was the last remaining task
-        if (job.status !== 'completed' && (remainingHours <= 0 || isLastRemainingTask(job, req.params.subtaskId))) {
+        // Only complete job when every assigned technician on every subtask has reached 100%.
+        // isLastRemainingTask was removed: it returned true when totalRemainingTasks <= 1,
+        // which fired prematurely while one task was still pending.
+        if (job.status !== 'completed' && isJobFullyCompleteByAssignments(job)) {
             job.status = 'completed';
             job.progress_percentage = 100;
             job.remaining_hours = 0;
@@ -387,9 +389,14 @@ function getDefaultSubtasks() {
     }));
 }
 
-async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
+async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKeyOrKeys) {
     const docs = Array.isArray(jobDocs) ? jobDocs : (jobDocs ? [jobDocs] : []);
     if (!docs.length) return [];
+
+    // Support single key or array of keys (for cross-supervisor enrichment)
+    const supervisorKeys = Array.isArray(supervisorKeyOrKeys) ? supervisorKeyOrKeys : [supervisorKeyOrKeys];
+    const supervisorKey = supervisorKeys[0]; // keep backward-compat alias
+    const supervisorKeyMatch = supervisorKeys.length === 1 ? supervisorKeys[0] : { $in: supervisorKeys };
 
     const jobNumbers = docs.map((j) => j?.job_number).filter(Boolean);
     if (!jobNumbers.length) {
@@ -407,34 +414,69 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
         });
     }
 
-    const logAgg = await TimeLog.aggregate([
-        {
-            $match: {
-                supervisor_key: supervisorKey,
-                is_idle: false,
-                job_id: { $in: jobNumbers },
-                subtask_id: { $ne: null }
-            }
-        },
-        {
-            $group: {
-                _id: {
-                    job_id: '$job_id',
-                    subtask_id: '$subtask_id',
-                    technician_id: '$technician_id'
-                },
-                consumed: {
-                    $sum: {
-                        $cond: [
-                            { $gt: ['$approved_hours', 0] },
-                            '$approved_hours',
-                            '$hours_logged'
-                        ]
+    // Two parallel aggregations:
+    // 1. Per-subtask breakdown (subtask_id required) — drives per-task progress bars.
+    // 2. Job-level total (all non-idle logs) — drives overall job progress %.
+    //    Hours logged against a job without a subtask (pre-subtask data, legacy imports)
+    //    are invisible in agg 1 but counted correctly in agg 2.
+    const [logAgg, jobLevelAgg] = await Promise.all([
+        TimeLog.aggregate([
+            {
+                $match: {
+                    supervisor_key: supervisorKeyMatch,
+                    is_idle: false,
+                    job_id: { $in: jobNumbers },
+                    subtask_id: { $ne: null }
+                }
+            },
+            {
+                $group: {
+                    _id: {
+                        job_id: '$job_id',
+                        subtask_id: '$subtask_id',
+                        technician_id: '$technician_id'
+                    },
+                    consumed: {
+                        $sum: {
+                            $cond: [
+                                { $gt: ['$approved_hours', 0] },
+                                '$approved_hours',
+                                '$hours_logged'
+                            ]
+                        }
                     }
                 }
             }
-        }
+        ]),
+        TimeLog.aggregate([
+            {
+                $match: {
+                    supervisor_key: supervisorKeyMatch,
+                    is_idle: false,
+                    job_id: { $in: jobNumbers }
+                }
+            },
+            {
+                $group: {
+                    _id: '$job_id',
+                    consumed: {
+                        $sum: {
+                            $cond: [
+                                { $gt: ['$approved_hours', 0] },
+                                '$approved_hours',
+                                '$hours_logged'
+                            ]
+                        }
+                    }
+                }
+            }
+        ])
     ]);
+
+    // Map from job_number → true total consumed hours (all logs, not just subtask-linked)
+    const jobLevelConsumedMap = new Map(
+        jobLevelAgg.map(r => [String(r._id), Number(r.consumed || 0)])
+    );
 
     const consumedByJob = new Map();
     const consumedByJobSubtask = new Map();
@@ -507,7 +549,8 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKey) {
         const firstTech = (obj.technicians || [])[0];
         const jobAllocated = Number(obj.allocated_hours || 0);
 
-        const totalConsumedAcrossSubtasks = consumedByJob.get(String(obj.job_number)) || 0;
+        // Use the full-job aggregate so hours logged without a subtask_id are included.
+        const totalConsumedAcrossSubtasks = jobLevelConsumedMap.get(String(obj.job_number)) || 0;
         const overall = jobAllocated > 0
             ? Math.max(0, Math.min(100, (totalConsumedAcrossSubtasks / jobAllocated) * 100))
             : 0;
@@ -728,6 +771,214 @@ router.put('/by-job/:jobNumber/assign-technician', requireSupervisor, async (req
     }
 });
 
+// Classify an entry into one of five buckets without trusting the stored
+// time_category field (which defaults to 'productive' for legacy records).
+function classifyJobEntry(entry) {
+    if (entry.is_leave || ['Leave', 'Sick'].includes(entry.category)) return 'not_available';
+    if (entry.category === 'Training') return 'training';
+    if (['Admin', 'Waiting for Parts'].includes(entry.category)) return 'non_productive';
+    if (entry.hour_category === 'utilization_loss') return entry.is_idle ? 'idle' : 'non_productive';
+    if (!entry.is_idle && entry.job_id) return 'productive';
+    return 'idle'; // Idle, Housekeeping (legacy), Site Work, Travelling, uncategorised
+}
+
+async function aggregateCompletedJobsReport(jobs, supervisorKey) {
+    const jobNumbers = Array.isArray(jobs)
+        ? jobs.map((j) => String(j?.job_number || '')).filter(Boolean)
+        : [];
+    if (!jobNumbers.length) return [];
+
+    const [timeLogs, reports] = await Promise.all([
+        TimeLog.find({
+            ...tenantQuery(supervisorKey),
+            job_id: { $in: jobNumbers }
+        }).lean(),
+        JobReport.find({
+            ...tenantQuery(supervisorKey),
+            job_id: { $in: jobNumbers }
+        }).lean()
+    ]);
+
+    const technicianIds = new Set();
+    jobs.forEach((jobDoc) => {
+        const job = jobDoc.toObject ? jobDoc.toObject() : jobDoc;
+        (job.technicians || []).forEach((tech) => {
+            if (tech?.technician_id) technicianIds.add(String(tech.technician_id));
+        });
+        (job.subtasks || []).forEach((st) => {
+            (st.assigned_technicians || []).forEach((a) => {
+                if (a?.technician_id) technicianIds.add(String(a.technician_id));
+            });
+        });
+    });
+    timeLogs.forEach((log) => {
+        if (log?.technician_id) technicianIds.add(String(log.technician_id));
+    });
+    reports.forEach((report) => {
+        if (report?.technician_id) technicianIds.add(String(report.technician_id));
+    });
+
+    const technicianLookup = {};
+    if (technicianIds.size) {
+        const technicians = await Technician.find({
+            ...tenantQuery(supervisorKey),
+            _id: { $in: Array.from(technicianIds) }
+        }).select({ _id: 1, name: 1 }).lean();
+        technicians.forEach((tech) => {
+            if (tech?._id) technicianLookup[String(tech._id)] = tech.name;
+        });
+    }
+
+    const logsByJob = timeLogs.reduce((acc, log) => {
+        if (!log || !log.job_id) return acc;
+        if (!acc.has(log.job_id)) acc.set(log.job_id, []);
+        acc.get(log.job_id).push(log);
+        return acc;
+    }, new Map());
+
+    const reportsByJob = reports.reduce((acc, report) => {
+        if (!report || !report.job_id) return acc;
+        if (!acc.has(report.job_id)) acc.set(report.job_id, []);
+        acc.get(report.job_id).push(report);
+        return acc;
+    }, new Map());
+
+    return jobs.map((jobDoc) => {
+        const job = jobDoc.toObject ? jobDoc.toObject() : jobDoc;
+        const entries = logsByJob.get(String(job.job_number)) || [];
+        const jobReports = reportsByJob.get(String(job.job_number)) || [];
+
+        const summary = {
+            total_hours: 0,
+            productive_hours: 0,
+            training_hours: 0,
+            non_productive_hours: 0,
+            idle_hours: 0,
+            not_available_hours: 0,
+            entries_count: entries.length
+        };
+
+        const hoursByTechnician = {};
+
+        // Derive first/last log dates from actual entries
+        const logDates = entries.map(e => e.log_date).filter(Boolean).map(d => new Date(d));
+        const firstLogDate = logDates.length ? new Date(Math.min(...logDates.map(d => d.getTime()))) : null;
+        const lastLogDate  = logDates.length ? new Date(Math.max(...logDates.map(d => d.getTime()))) : null;
+
+        const timeEntries = entries
+            .slice()
+            .sort((a, b) => new Date(a.log_date) - new Date(b.log_date))
+            .map((entry) => {
+                const hrs    = Number(entry.hours_logged || 0);
+                const bucket = classifyJobEntry(entry);
+                const techId   = String(entry.technician_id || '');
+                const techName = techId ? technicianLookup[techId] || null : null;
+
+                // Per-technician accumulation
+                if (techId) {
+                    if (!hoursByTechnician[techId]) {
+                        hoursByTechnician[techId] = {
+                            technician_id: techId,
+                            technician_name: techName,
+                            total_hours: 0,
+                            productive_hours: 0,
+                            training_hours: 0,
+                            non_productive_hours: 0,
+                            idle_hours: 0,
+                        };
+                    }
+                    const ts = hoursByTechnician[techId];
+                    ts.total_hours += hrs;
+                    if (bucket === 'productive')     ts.productive_hours     += hrs;
+                    else if (bucket === 'training')  ts.training_hours       += hrs;
+                    else if (bucket === 'non_productive') ts.non_productive_hours += hrs;
+                    else if (bucket === 'idle')      ts.idle_hours           += hrs;
+                }
+
+                // Team summary accumulation
+                summary.total_hours += hrs;
+                if (bucket === 'productive')          summary.productive_hours     += hrs;
+                else if (bucket === 'training')       summary.training_hours       += hrs;
+                else if (bucket === 'non_productive') summary.non_productive_hours += hrs;
+                else if (bucket === 'idle')           summary.idle_hours           += hrs;
+                else if (bucket === 'not_available')  summary.not_available_hours  += hrs;
+
+                return {
+                    date: entry.log_date,
+                    technician_id: techId || null,
+                    technician_name: techName,
+                    classification: bucket,
+                    category: entry.category || null,
+                    sub_reason: entry.category_detail ? String(entry.category_detail).trim() || null : null,
+                    job_id: entry.job_id || null,
+                    hours: hrs,
+                    notes: entry.notes || null,
+                };
+            });
+
+        return {
+            job_number: job.job_number,
+            description: job.description,
+            supervisor_key: job.supervisor_key,
+            status: job.status,
+            allocated_hours: job.allocated_hours,
+            remaining_hours: job.remaining_hours,
+            start_date: job.start_date || firstLogDate,
+            end_date: job.actual_completion_date || lastLogDate,
+            first_log_date: firstLogDate,
+            last_log_date: lastLogDate,
+            completed_at: job.actual_completion_date || job.updatedAt || null,
+            technicians: job.technicians || [],
+            time_summary: summary,
+            hours_by_technician: Object.values(hoursByTechnician),
+            time_entries: timeEntries,
+            job_reports: jobReports.map((report) => ({
+                date: report.date,
+                technician_id: report.technician_id ? String(report.technician_id) : null,
+                technician_name: report.technician_id ? technicianLookup[String(report.technician_id)] || null : null,
+                work_completed: report.work_completed || null,
+                has_bottleneck: report.has_bottleneck || false,
+                bottleneck_description: report.bottleneck_description || null,
+                notes: report.notes || null,
+            })),
+        };
+    });
+}
+
+// Get completed jobs report
+router.get('/completed-report', requireAuth, async (req, res) => {
+    try {
+        const filter = {
+            ...tenantQuery(req.tenant.supervisor_key),
+            status: 'completed'
+        };
+
+        if (req.query.fromDate) {
+            const from = new Date(req.query.fromDate);
+            if (Number.isNaN(from.getTime())) {
+                return res.status(400).json({ error: 'Invalid fromDate' });
+            }
+            filter.actual_completion_date = { ...filter.actual_completion_date, $gte: from };
+        }
+        if (req.query.toDate) {
+            const to = new Date(req.query.toDate);
+            if (Number.isNaN(to.getTime())) {
+                return res.status(400).json({ error: 'Invalid toDate' });
+            }
+            to.setHours(23, 59, 59, 999);
+            filter.actual_completion_date = { ...filter.actual_completion_date, $lte: to };
+        }
+
+        const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
+        const jobs = await Job.find(filter).sort({ actual_completion_date: -1, updatedAt: -1 }).limit(limit);
+        const enriched = await enrichJobsWithTimeLogProgress(jobs, req.tenant.supervisor_key);
+        const report = await aggregateCompletedJobsReport(enriched, req.tenant.supervisor_key);
+        res.json(report);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Get all jobs
 router.get('/', requireAuth, async (req, res) => {
     try {
@@ -745,15 +996,8 @@ router.get('/', requireAuth, async (req, res) => {
 router.get('/technician/:technicianId', requireAuth, async (req, res) => {
     try {
         const technicianId = req.params.technicianId;
-        
-        // First, find the technician to get their supervisor's tenant
-        const technician = await Technician.findOne({ technician_id: technicianId });
-        if (!technician) {
-            return res.status(404).json({ error: 'Technician not found' });
-        }
-        
-        // Find jobs assigned to this technician from ANY supervisor (for global allocations)
-        // Plus jobs from their own supervisor's tenant
+
+        // Find jobs assigned to this technician from ANY supervisor (cross-workshop support)
         const jobs = await Job.find({
             $or: [
                 // Jobs from technician's own supervisor
@@ -764,7 +1008,7 @@ router.get('/technician/:technicianId', requireAuth, async (req, res) => {
                         { 'subtasks.assigned_technicians.technician_id': technicianId }
                     ]
                 },
-                // Jobs from other supervisors (global allocations)
+                // Jobs from other supervisors (global/temporary allocations)
                 {
                     'technicians.technician_id': technicianId,
                     supervisor_key: { $ne: req.tenant.supervisor_key }
@@ -775,7 +1019,13 @@ router.get('/technician/:technicianId', requireAuth, async (req, res) => {
                 }
             ]
         }).sort({ createdAt: -1 }).limit(200);
-        const enriched = await enrichJobsWithTimeLogProgress(jobs, req.tenant.supervisor_key);
+
+        // Enrich using all relevant supervisor keys so cross-workshop time logs are included
+        const allSupervisorKeys = [...new Set([
+            req.tenant.supervisor_key,
+            ...jobs.map(j => j.supervisor_key).filter(Boolean)
+        ])];
+        const enriched = await enrichJobsWithTimeLogProgress(jobs, allSupervisorKeys);
         res.json(enriched);
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -1040,6 +1290,7 @@ router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
                 job.remaining_hours = Math.max(0, nextAllocated - consumed);
                 job.overrun_hours = Math.max(0, consumed - nextAllocated);
                 job.progress_percentage = Math.min(100, nextAllocated > 0 ? (consumed / nextAllocated) * 100 : 0);
+                job.status = computeDerivedStatus(job);
             }
         }
 
@@ -1256,7 +1507,8 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId', requireSupervisor, async (r
         }
 
         await job.save();
-        res.json(job);
+        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        res.json(enriched[0]);
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -1289,9 +1541,24 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId/progress', requireAuth, async
     }
 });
 
-// Delete job
+// Delete job — cascades to TimeLogs and JobReports to prevent orphan records.
 router.delete('/:id', requireSupervisor, async (req, res) => {
     try {
+        const job = await Job.findOne({
+            ...tenantQuery(req.tenant.supervisor_key),
+            _id: req.params.id
+        });
+        if (!job) return res.status(404).json({ error: 'Job not found' });
+
+        const jobNumber = job.job_number;
+
+        // Cascade: remove all time entries and job reports linked to this job.
+        // This prevents orphan records from inflating KPI calculations.
+        await Promise.all([
+            TimeLog.deleteMany({ supervisor_key: req.tenant.supervisor_key, job_id: jobNumber }),
+            JobReport.deleteMany({ supervisor_key: req.tenant.supervisor_key, job_id: jobNumber })
+        ]);
+
         await Job.deleteOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id });
         res.json({ message: 'Job deleted' });
     } catch (error) {

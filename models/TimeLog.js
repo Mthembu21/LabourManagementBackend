@@ -1,13 +1,38 @@
 const mongoose = require('mongoose');
+const AttendanceRecord = require('./AttendanceRecord');
+const timeAllocationService = require('../services/timeAllocationService');
 
 const IDLE_CATEGORIES = [
-    'Housekeeping',
-    'Sick',
-    'Leave',
+    // Active categories (selectable in new entries)
+    'Idle',              // Generic idle — requires category_detail sub_reason
+    'Admin',
+    'Waiting for Parts',
     'Training',
-    'Travelling',
+    'Leave',
+    'Sick',
+    // Legacy — kept for backward-compat with existing records; hidden from new UI
+    'Housekeeping',
     'Site Work',
-    'Other'
+    'Travelling',
+    'Other',
+];
+
+// Categories shown to users when logging non-productive time
+const ENTRY_CATEGORIES = [
+    'Idle',
+    'Admin',
+    'Waiting for Parts',
+    'Training',
+    'Leave',
+    'Sick',
+];
+
+// Sub-reasons required when category = 'Idle'
+const IDLE_SUB_REASONS = [
+    'Housekeeping',
+    'Waiting',
+    'No Work',
+    'Other',
 ];
 
 // Strict time classification system for operational planning
@@ -176,6 +201,8 @@ timeLogSchema.index(
 );
 
 timeLogSchema.statics.IDLE_CATEGORIES = IDLE_CATEGORIES;
+timeLogSchema.statics.ENTRY_CATEGORIES = ENTRY_CATEGORIES;
+timeLogSchema.statics.IDLE_SUB_REASONS = IDLE_SUB_REASONS;
 timeLogSchema.statics.HOUR_CATEGORIES = HOUR_CATEGORIES;
 timeLogSchema.statics.TIME_CATEGORIES = TIME_CATEGORIES;
 
@@ -187,43 +214,60 @@ timeLogSchema.statics.normalizeLogDate = (dateObj) => {
 
 // Determine time category based on entry data (strict classification)
 timeLogSchema.statics.determineTimeCategory = (entry) => {
-    // Productive: Job/work order booked hours (not idle)
-    if (!entry.is_idle && entry.job_id && entry.category !== 'Housekeeping') {
-        return TIME_CATEGORIES.PRODUCTIVE;
-    }
-    
-    // Not Available: Leave, Sick
+    // 1. Not Available wins over everything: Leave and Sick keep the technician
+    //    out of all productive/non-productive calculations.
     if (entry.is_leave || ['Leave', 'Sick'].includes(entry.category)) {
         return TIME_CATEGORIES.NOT_AVAILABLE;
     }
-    
-    // Non-Productive: Training, Housekeeping, admin, waiting for parts, unbookable work
+
+    // 2. Non-productive activities are checked BEFORE job_id so that a Training
+    //    or Housekeeping entry booked against a work-order is still counted as
+    //    non-productive, not productive.
     if (['Training', 'Housekeeping', 'Admin', 'Waiting for Parts', 'Site Work'].includes(entry.category)) {
         return TIME_CATEGORIES.NON_PRODUCTIVE;
     }
-    
-    // Handle legacy utilization_loss - map to appropriate category
+
+    // 3. Legacy utilization_loss entries
     if (entry.hour_category === 'utilization_loss') {
-        // If it's utilization_loss and not idle, classify as non-productive
-        if (!entry.is_idle) {
-            return TIME_CATEGORIES.NON_PRODUCTIVE;
-        }
-        // If it's utilization_loss and idle, classify as idle
-        return TIME_CATEGORIES.IDLE;
+        return entry.is_idle ? TIME_CATEGORIES.IDLE : TIME_CATEGORIES.NON_PRODUCTIVE;
     }
-    
-    // Idle: No work assigned (capacity loss)
+
+    // 4. Productive: job booked, not idle, no overriding category above
+    if (!entry.is_idle && entry.job_id) {
+        return TIME_CATEGORIES.PRODUCTIVE;
+    }
+
+    // 5. Anything remaining with no job and no special category is idle (capacity loss)
     return TIME_CATEGORIES.IDLE;
 };
 
 // Calculate utilization and productivity metrics using new operational principles
 timeLogSchema.statics.calculateOperationalMetrics = async (supervisorKey, technicianId, startDate, endDate, totalContractedHours = null) => {
     const TimeLog = mongoose.model('TimeLog');
-    
+
+    // NEW: Get all dates in range to check for leave/sick days
+    const { eachDayOfInterval } = require('date-fns');
+    const allDates = eachDayOfInterval({ start: startDate, end: endDate });
+    const leaveSickDays = await AttendanceRecord.find({
+        supervisor_key: supervisorKey,
+        technician_id: technicianId,
+        date: { $gte: startDate, $lte: endDate },
+        status: 'approved'
+    });
+
+    // Build set of leave/sick day dates for quick lookup
+    const leaveSickDaySet = new Set(leaveSickDays.map(r => r.date.toISOString().split('T')[0]));
+
     const entries = await TimeLog.find({
         supervisor_key: supervisorKey,
         technician_id: technicianId,
         log_date: { $gte: startDate, $lte: endDate }
+    });
+
+    // Filter out entries from leave/sick days
+    const workingEntries = entries.filter(entry => {
+        const dateStr = new Date(entry.log_date).toISOString().split('T')[0];
+        return !leaveSickDaySet.has(dateStr);
     });
 
     // Calculate hours by category
@@ -232,10 +276,10 @@ timeLogSchema.statics.calculateOperationalMetrics = async (supervisorKey, techni
     let idleHours = 0;
     let notAvailableHours = 0;
 
-    entries.forEach(entry => {
+    workingEntries.forEach(entry => {
         const hours = Number(entry.hours_logged || 0);
         const category = entry.time_category || TimeLog.determineTimeCategory(entry);
-        
+
         switch (category) {
             case TIME_CATEGORIES.PRODUCTIVE:
                 productiveHours += hours;
@@ -262,7 +306,7 @@ timeLogSchema.statics.calculateOperationalMetrics = async (supervisorKey, techni
 
     // Total Contracted Hours (provided or calculated)
     if (totalContractedHours === null) {
-        // Default to sum of all logged hours if not provided
+        // Default to sum of all logged hours if not provided, but exclude leave/sick
         totalContractedHours = productiveHours + nonProductiveHours + idleHours + notAvailableHours;
     }
 
@@ -287,6 +331,7 @@ timeLogSchema.statics.calculateOperationalMetrics = async (supervisorKey, techni
         nonProductiveHours,
         idleHours,
         notAvailableHours,
+        leaveSickDays: leaveSickDays.length,
         totalContractedHours,
         adjustedAvailableHours,
         workingHours,
@@ -317,13 +362,44 @@ timeLogSchema.statics.calculateDailyOperationalMetrics = async (supervisorKey, t
         dayStart.setHours(0, 0, 0, 0);
         const dayEnd = new Date(day);
         dayEnd.setHours(23, 59, 59, 999);
-        
+
+        // NEW: Check if this day is a leave/sick day
+        const attendanceRecord = await AttendanceRecord.findOne({
+            supervisor_key: supervisorKey,
+            technician_id: technicianId,
+            date: { $gte: dayStart, $lte: dayEnd },
+            status: 'approved'
+        });
+
+        // If leave/sick day, return attendance record instead of KPI
+        if (attendanceRecord) {
+            dailyData.push({
+                date: day,
+                is_leave_day: attendanceRecord.attendance_type === 'leave',
+                is_sick_day: attendanceRecord.attendance_type === 'sick',
+                attendance_type: attendanceRecord.attendance_type,
+                attendance_hours: attendanceRecord.hours_credited,
+                kpi_applicable: false,
+                reason: `${attendanceRecord.attendance_type}_day`,
+                totalHours: 0,
+                productiveHours: 0,
+                nonProductiveHours: 0,
+                idleHours: 0,
+                notAvailableHours: 0,
+                utilization: null,
+                productivity: null,
+                idlePercentage: null,
+                totalProductivity: null
+            });
+            continue; // Skip KPI calculation for this day
+        }
+
         const entries = await TimeLog.find({
             supervisor_key: supervisorKey,
             technician_id: technicianId,
             log_date: { $gte: dayStart, $lte: dayEnd }
         });
-        
+
         console.log(`🔍 Day ${day.toISOString()} has ${entries.length} entries for technician ${technicianId}`);
         
         // Categorize hours using new TimeCategory system

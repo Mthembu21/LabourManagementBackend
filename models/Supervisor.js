@@ -4,7 +4,7 @@ const supervisorSchema = new mongoose.Schema({
     supervisor_key: {
         type: String,
         required: true,
-        enum: ['component', 'rebuild', 'pdis'],
+        enum: ['component', 'rebuild', 'pdis', 'kathu'],
         index: true
     },
     role: {

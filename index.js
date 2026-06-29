@@ -13,6 +13,15 @@ const jobReportRoutes = require('./routes/jobReport.routes');
 const archiveRoutes = require('./routes/archive.routes');
 const overviewRoutes = require('./routes/overview.routes');
 const utilizationRoutes = require('./routes/utilization.routes');
+const pauseResumeRoutes = require('./routes/pauseResume.routes');
+const trainingRoutes = require('./routes/training.routes');
+const overtimeRoutes = require('./routes/overtime.routes');
+const kpiRoutes = require('./routes/kpi.routes');
+const jobManagementRoutes = require('./routes/job.management.routes');
+const reportRoutes = require('./routes/reports.routes');
+const alertRoutes = require('./routes/alerts.routes');
+const systemFixesRoutes = require('./routes/system-fixes.routes');
+const attendanceRoutes = require('./routes/attendance.routes');
 
 const app = express();
 app.set("trust proxy", 1); // required for cookies behind Render proxy
@@ -24,11 +33,19 @@ connectDB();
 // CORS Middleware
 const allowedOrigins = [
   "http://localhost:5173",
+  "http://localhost:5174",
   "http://localhost:5175",
   "http://localhost:5176",
+  "http://localhost:5177",
+  "http://localhost:5178",
+  "http://localhost:5179",
   "http://127.0.0.1:5173",
+  "http://127.0.0.1:5174",
   "http://127.0.0.1:5175",
   "http://127.0.0.1:5176",
+  "http://127.0.0.1:5177",
+  "http://127.0.0.1:5178",
+  "http://127.0.0.1:5179",
   process.env.FRONTEND_URL,
   process.env.FRONTEND_URL_2,
   "https://labour-utilization.onrender.com"
@@ -85,6 +102,17 @@ app.use("/api/job-reports", jobReportRoutes);
 app.use("/api/archives", archiveRoutes);
 app.use("/api/overview", overviewRoutes);
 app.use("/api/metrics", utilizationRoutes);
+
+// Mount additional feature routes
+app.use("/api/pause-resume", pauseResumeRoutes);
+app.use("/api/training", trainingRoutes);
+app.use("/api/overtime", overtimeRoutes);
+app.use("/api/kpi", kpiRoutes);
+app.use("/api/job-management", jobManagementRoutes);
+app.use("/api/reports", reportRoutes);
+app.use("/api/alerts", alertRoutes);
+app.use("/api/system-fixes", systemFixesRoutes);
+app.use("/api/attendance", attendanceRoutes);
 
 // Add cross-supervisor job fix route
 const fixCrossSupervisorJobsRoutes = require('./routes/fixCrossSupervisorJobs.routes');

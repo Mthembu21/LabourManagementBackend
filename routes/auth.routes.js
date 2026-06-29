@@ -81,10 +81,17 @@ async function ensureSupervisorsSeeded() {
         },
         {
             supervisor_key: 'pdis',
-            email: 'john.vanderberg@epiroc.com',
+            email: 'banele.masondo@epiroc.com',
             password: '963',
             role: 'foreman',
             access: ['pdi', 'rebuild']
+        },
+        {
+            supervisor_key: 'kathu',
+            email: 'kathu.login@epiroc.com',
+            password: '2026!',
+            role: 'supervisor',
+            access: ['components']
         },
         {
             supervisor_key: 'component',
@@ -211,6 +218,7 @@ router.post('/switch-tenant', async (req, res) => {
         // Map requested tenant to access key
         const tenantToAccess = {
             component: 'components',
+            kathu: 'components',
             pdis: 'pdi',
             rebuild: 'rebuild'
         };

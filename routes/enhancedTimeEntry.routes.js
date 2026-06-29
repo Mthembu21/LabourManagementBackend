@@ -1,198 +1,265 @@
 const express = require('express');
 const router = express.Router();
-const TimeLog = require('../models/TimeLog');
-const Technician = require('../models/Technician');
+const DayEntry = require('../models/DayEntry');
+const WeekEntry = require('../models/WeekEntry');
 const Job = require('../models/Job');
-const TemporaryAssignment = require('../models/TemporaryAssignment');
-const { requireAuth, requireSupervisor, tenantQuery } = require('../middleware/auth');
+const Technician = require('../models/Technician');
+const { requireAuth } = require('../middleware/auth');
 
-// Create time entry with temporary assignment context
-router.post('/', requireAuth, async (req, res) => {
+/**
+ * Enhanced Time Entry Routes - Phase 2
+ * Uses structured Day/Week objects for improved KPI calculation
+ */
+
+// Log productive hours for a job
+router.post('/:supervisorKey/productive', requireAuth, async (req, res) => {
     try {
-        const { 
-            technician_id, 
-            job_id, 
-            subtask_id, 
-            hours_logged, 
-            log_date,
-            category,
-            category_detail,
-            is_idle,
-            temporary_assignment_id 
-        } = req.body;
+        const { supervisorKey } = req.params;
+        const { technician_id, date, job_id, subtask_id, productive_hours, notes } = req.body;
 
-        // Validate required fields
-        if (!technician_id || !job_id || !hours_logged || !log_date) {
-            return res.status(400).json({ 
-                error: 'Missing required fields: technician_id, job_id, hours_logged, log_date' 
-            });
+        if (!technician_id || !date || !job_id || productive_hours === undefined) {
+            return res.status(400).json({ error: 'Missing required fields' });
         }
 
-        // Check if technician has active temporary assignment
-        let temporaryAssignment = null;
-        if (temporary_assignment_id) {
-            temporaryAssignment = await TemporaryAssignment.findById(temporary_assignment_id);
-            if (!temporaryAssignment || temporaryAssignment.status !== 'active') {
-                return res.status(400).json({ error: 'Invalid temporary assignment' });
-            }
-        }
-
-        // Get technician details
-        const technician = await Technician.findById(technician_id);
-        if (!technician) {
-            return res.status(404).json({ error: 'Technician not found' });
-        }
-
-        // Determine supervisor context
-        const supervisorKey = temporaryAssignment 
-            ? temporaryAssignment.temporary_supervisor_key 
-            : req.tenant.supervisor_key;
-
-        // Create time entry with assignment context
-        const timeEntry = new TimeLog({
+        let dayEntry = await DayEntry.findOne({
             supervisor_key: supervisorKey,
             technician_id,
-            job_id,
-            subtask_id: subtask_id || null,
-            hours_logged: Number(hours_logged),
-            log_date: new Date(log_date),
-            category: category || null,
-            category_detail: category_detail || '',
-            is_idle: Boolean(is_idle),
-            
-            // Temporary assignment context
-            temporary_assignment_id: temporary_assignment_id || null,
-            is_temporary_assignment: Boolean(temporaryAssignment),
-            original_supervisor_key: temporaryAssignment 
-                ? temporaryAssignment.original_supervisor_key 
-                : req.tenant.supervisor_key,
-            
-            // Default approval status
-            approval_status: 'approved',
-            approved_hours: Number(hours_logged),
-            approved_by: req.session.user?.email || null,
-            approved_at: new Date()
+            date: new Date(date)
         });
 
-        await timeEntry.save();
-
-        // Update temporary assignment with hours logged
-        if (temporaryAssignment) {
-            await TemporaryAssignment.findByIdAndUpdate(temporary_assignment_id, {
-                $inc: { total_hours_logged: Number(hours_logged) }
+        if (!dayEntry) {
+            const tech = await Technician.findById(technician_id);
+            const dateObj = new Date(date);
+            dayEntry = new DayEntry({
+                supervisor_key: supervisorKey,
+                technician_id,
+                technician_name: tech?.name || 'Unknown',
+                date: dateObj,
+                day_of_week: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][dateObj.getDay()],
+                scheduled_hours: dateObj.getDay() === 5 ? 5.5 : 7.5
             });
         }
 
-        res.status(201).json({
-            message: 'Time entry created successfully',
-            timeEntry: {
-                ...timeEntry.toObject(),
-                isTemporaryAssignment: Boolean(temporaryAssignment),
-                assignmentContext: temporaryAssignment ? {
-                    id: temporaryAssignment._id,
-                    originalSupervisor: temporaryAssignment.original_supervisor_key,
-                    temporarySupervisor: temporaryAssignment.temporary_supervisor_key,
-                    reason: temporaryAssignment.reason,
-                    expiresAt: temporaryAssignment.expires_at
-                } : null
-            }
+        const jobEntryIndex = dayEntry.job_entries.findIndex(e => e.job_id === job_id);
+        if (jobEntryIndex >= 0) {
+            dayEntry.job_entries[jobEntryIndex].productive_hours = productive_hours;
+            if (subtask_id) dayEntry.job_entries[jobEntryIndex].subtask_id = subtask_id;
+            if (notes) dayEntry.job_entries[jobEntryIndex].notes = notes;
+        } else {
+            dayEntry.job_entries.push({
+                job_id,
+                job_number: job_id,
+                subtask_id: subtask_id || null,
+                productive_hours,
+                notes: notes || ''
+            });
+        }
+
+        await dayEntry.save();
+        res.json({
+            success: true,
+            data: dayEntry,
+            message: `Logged ${productive_hours} productive hours`
+        });
+    } catch (error) {
+        console.error('Error logging productive hours:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Log non-productive hours
+router.post('/:supervisorKey/non-productive', requireAuth, async (req, res) => {
+    try {
+        const { supervisorKey } = req.params;
+        const { technician_id, date, category, hours, description } = req.body;
+
+        if (!technician_id || !date || !hours) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+
+        let dayEntry = await DayEntry.findOne({
+            supervisor_key: supervisorKey,
+            technician_id,
+            date: new Date(date)
         });
 
+        if (!dayEntry) {
+            const tech = await Technician.findById(technician_id);
+            const dateObj = new Date(date);
+            dayEntry = new DayEntry({
+                supervisor_key: supervisorKey,
+                technician_id,
+                technician_name: tech?.name || 'Unknown',
+                date: dateObj,
+                day_of_week: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][dateObj.getDay()],
+                scheduled_hours: dateObj.getDay() === 5 ? 5.5 : 7.5
+            });
+        }
+
+        dayEntry.job_entries.push({
+            job_id: category,
+            job_number: category,
+            non_productive_hours: hours,
+            notes: `${category}: ${description || ''}`
+        });
+
+        await dayEntry.save();
+        res.json({ success: true, data: dayEntry });
     } catch (error) {
-        console.error('Time entry creation error:', error);
+        console.error('Error logging non-productive hours:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// Get time entries with assignment context
-router.get('/', requireAuth, async (req, res) => {
+// Log idle time
+router.post('/:supervisorKey/idle', requireAuth, async (req, res) => {
     try {
-        const { technician_id, start_date, end_date, include_temporary } = req.query;
-        
-        const query = { supervisor_key: req.tenant.supervisor_key };
-        
-        if (technician_id) {
-            query.technician_id = technician_id;
-        }
-        
-        if (start_date || end_date) {
-            query.log_date = {};
-            if (start_date) {
-                query.log_date.$gte = new Date(start_date);
-            }
-            if (end_date) {
-                query.log_date.$lte = new Date(end_date);
-            }
+        const { supervisorKey } = req.params;
+        const { technician_id, date, idle_hours, reason } = req.body;
+
+        if (!technician_id || !date || idle_hours === undefined) {
+            return res.status(400).json({ error: 'Missing required fields' });
         }
 
-        // Include temporary assignments if requested
-        if (include_temporary === 'true') {
-            query.$or = [
-                { supervisor_key: req.tenant.supervisor_key },
-                { is_temporary_assignment: true }
-            ];
+        let dayEntry = await DayEntry.findOne({
+            supervisor_key: supervisorKey,
+            technician_id,
+            date: new Date(date)
+        });
+
+        if (!dayEntry) {
+            const tech = await Technician.findById(technician_id);
+            const dateObj = new Date(date);
+            dayEntry = new DayEntry({
+                supervisor_key: supervisorKey,
+                technician_id,
+                technician_name: tech?.name || 'Unknown',
+                date: dateObj,
+                day_of_week: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][dateObj.getDay()],
+                scheduled_hours: dateObj.getDay() === 5 ? 5.5 : 7.5
+            });
         }
 
-        const timeEntries = await TimeLog.find(query)
-            .populate('temporary_assignment_id', 'reason original_supervisor_key temporary_supervisor_key')
-            .populate('technician_id', 'name employee_id employeeNumber')
-            .sort({ log_date: -1, createdAt: -1 });
+        dayEntry.job_entries.push({
+            job_id: `idle_${reason || 'general'}`,
+            job_number: `Idle - ${reason || 'General'}`,
+            idle_hours,
+            notes: reason || 'No assignment'
+        });
 
-        res.json(timeEntries);
+        await dayEntry.save();
+        res.json({ success: true, data: dayEntry });
     } catch (error) {
-        console.error('Get time entries error:', error);
+        console.error('Error logging idle time:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
-// Get performance summary for temporary assignments
-router.get('/temporary-assignment-performance/:assignmentId', requireSupervisor, async (req, res) => {
+// Add note to job entry
+router.post('/:supervisorKey/add-note', requireAuth, async (req, res) => {
     try {
-        const { assignmentId } = req.params;
-        
-        const assignment = await TemporaryAssignment.findById(assignmentId)
-            .populate('technician_id', 'name employee_id employeeNumber');
+        const { supervisorKey } = req.params;
+        const { technician_id, date, job_id, note } = req.body;
 
-        if (!assignment || assignment.temporary_supervisor_key !== req.tenant.supervisor_key) {
-            return res.status(404).json({ error: 'Temporary assignment not found' });
+        if (!technician_id || !date || !job_id || !note) {
+            return res.status(400).json({ error: 'Missing required fields' });
         }
 
-        // Get all time entries for this assignment
-        const timeEntries = await TimeLog.find({
-            temporary_assignment_id: assignmentId
-        }).sort({ log_date: -1 });
+        const dayEntry = await DayEntry.findOne({
+            supervisor_key: supervisorKey,
+            technician_id,
+            date: new Date(date)
+        });
 
-        // Calculate performance metrics
-        const totalHours = timeEntries.reduce((sum, entry) => sum + Number(entry.hours_logged || 0), 0);
-        const productiveHours = timeEntries
-            .filter(entry => !entry.is_idle)
-            .reduce((sum, entry) => sum + Number(entry.hours_logged || 0), 0);
-        const jobsWorked = new Set(timeEntries.map(entry => entry.job_id)).size;
+        if (!dayEntry) {
+            return res.status(404).json({ error: 'Day entry not found' });
+        }
 
-        const performance = {
-            assignment: {
-                ...assignment.toObject(),
-                technician: assignment.technician_id
-            },
-            metrics: {
-                totalHoursLogged: totalHours,
-                productiveHours: productiveHours,
-                utilizationRate: totalHours > 0 ? (productiveHours / totalHours) * 100 : 0,
-                jobsWorked: jobsWorked,
-                averageHoursPerJob: jobsWorked > 0 ? totalHours / jobsWorked : 0,
-                timeEntries: timeEntries.map(entry => ({
-                    date: entry.log_date,
-                    jobId: entry.job_id,
-                    hours: entry.hours_logged,
-                    isProductive: !entry.is_idle,
-                    category: entry.category
-                }))
+        const jobEntry = dayEntry.job_entries.find(e => e.job_id === job_id);
+        if (!jobEntry) {
+            return res.status(404).json({ error: 'Job entry not found' });
+        }
+
+        jobEntry.notes = (jobEntry.notes || '') + '\n' + note;
+        await dayEntry.save();
+        res.json({ success: true, data: dayEntry });
+    } catch (error) {
+        console.error('Error adding note:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get day entries
+router.get('/:supervisorKey/day/:date', requireAuth, async (req, res) => {
+    try {
+        const { supervisorKey, date } = req.params;
+        const { technician_id } = req.query;
+
+        const query = {
+            supervisor_key: supervisorKey,
+            date: {
+                $gte: new Date(date),
+                $lt: new Date(new Date(date).getTime() + 86400000)
             }
         };
 
-        res.json(performance);
+        if (technician_id) {
+            query.technician_id = technician_id;
+        }
+
+        const dayEntries = await DayEntry.find(query).populate('technician_id', 'name employee_id');
+        res.json({ success: true, data: dayEntries });
     } catch (error) {
-        console.error('Get temporary assignment performance error:', error);
+        console.error('Error fetching day entries:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get week entries
+router.get('/:supervisorKey/week/:weekNum/:year', requireAuth, async (req, res) => {
+    try {
+        const { supervisorKey, weekNum, year } = req.params;
+        const { technician_id } = req.query;
+
+        const query = {
+            supervisor_key: supervisorKey,
+            week_number: parseInt(weekNum),
+            year: parseInt(year)
+        };
+
+        if (technician_id) {
+            query.technician_id = technician_id;
+        }
+
+        const weekEntries = await WeekEntry.find(query).populate('technician_id', 'name employee_id');
+        res.json({ success: true, data: weekEntries });
+    } catch (error) {
+        console.error('Error fetching week entries:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Approve time entry
+router.post('/:supervisorKey/approve', requireAuth, async (req, res) => {
+    try {
+        const { supervisorKey } = req.params;
+        const { day_entry_id, approval_notes } = req.body;
+
+        const dayEntry = await DayEntry.findById(day_entry_id);
+        if (!dayEntry || dayEntry.supervisor_key !== supervisorKey) {
+            return res.status(404).json({ error: 'Day entry not found' });
+        }
+
+        dayEntry.entry_status = 'approved';
+        dayEntry.supervisor_approved = true;
+        dayEntry.approved_by = req.user?.id || 'system';
+        dayEntry.approval_date = new Date();
+        dayEntry.approval_notes = approval_notes || '';
+
+        await dayEntry.save();
+        res.json({ success: true, data: dayEntry });
+    } catch (error) {
+        console.error('Error approving time entry:', error);
         res.status(500).json({ error: error.message });
     }
 });

@@ -1421,6 +1421,8 @@ const MonthlyHoursSummary = require('../models/MonthlyHoursSummary');
 const Job = require('../models/Job');
 const JobReport = require('../models/JobReport');
 const Technician = require('../models/Technician');
+const AttendanceRecord = require('../models/AttendanceRecord');
+const timeAllocationService = require('../services/timeAllocationService');
 const { requireAuth, requireSupervisor, tenantQuery } = require('../middleware/auth');
 const { getSouthAfricanHolidayInfo, normalizeDayOnly: normalizeHolidayDayOnly } = require('../lib/zaHolidays');
 
@@ -1537,26 +1539,30 @@ router.put('/:id/approve', requireSupervisor, async (req, res) => {
             return res.status(400).json({ error: 'Approval workflow is not enabled for this workshop' });
         }
 
-        const { approval_note, approved_hours } = req.body;
-        
-        const existing = await TimeLog.findOne({ 
-            ...tenantQuery(req.tenant.supervisor_key), 
-            _id: req.params.id 
+        const { approval_note, approved_hours, note } = req.body;
+        const resolvedNote = approval_note || note || '';
+
+        const existing = await TimeLog.findOne({
+            ...tenantQuery(req.tenant.supervisor_key),
+            _id: req.params.id
         });
-        
+
         if (!existing) return res.status(404).json({ error: 'Time log not found' });
-        if (existing.approval_status !== 'pending') {
-            return res.status(400).json({ error: 'Time log is not pending approval' });
+        if (existing.approval_status === 'approved') {
+            return res.status(400).json({ error: 'Time log has already been approved' });
+        }
+        if (existing.approval_status === 'declined') {
+            return res.status(400).json({ error: 'Time log has already been declined' });
         }
 
         // Validate approved hours
         const submittedHours = Number(existing.hours_logged || 0);
         const hoursToApprove = Number(approved_hours || submittedHours);
-        
+
         if (hoursToApprove < 0) {
             return res.status(400).json({ error: 'Approved hours cannot be negative' });
         }
-        
+
         if (hoursToApprove > submittedHours) {
             return res.status(400).json({ error: `Cannot approve more than submitted hours (${submittedHours}h)` });
         }
@@ -1566,49 +1572,103 @@ router.put('/:id/approve', requireSupervisor, async (req, res) => {
         existing.approved_hours = hoursToApprove;
         existing.approved_by = req.session.user.name || req.session.user.email;
         existing.approved_at = new Date();
-        existing.approval_note = approval_note || '';
-        
+        existing.approval_note = resolvedNote;
+
         // Add note about partial approval if applicable
         if (hoursToApprove < submittedHours) {
-            existing.approval_note = (existing.approval_note || '') + 
+            existing.approval_note = (existing.approval_note || '') +
                 ` (Partial approval: ${hoursToApprove}h of ${submittedHours}h submitted)`;
         }
-        
+
         await existing.save();
 
-        // Update job consumed hours for non-idle entries
+        // Recompute job + stage progress — isolated so a job update failure doesn't block the approval response
         if (!existing.is_idle) {
-            const job = await Job.findOne({ 
-                ...tenantQuery(req.tenant.supervisor_key), 
-                job_number: existing.job_id 
-            });
-            
-            if (job) {
-                const currentConsumed = Number(job.consumed_hours || 0);
-                const approvedHours = Number(existing.approved_hours || 0); // Use approved hours, not submitted
-                
-                // Find if there are other pending entries for this job
-                const otherPending = await TimeLog.find({
+            try {
+                const job = await Job.findOne({
                     ...tenantQuery(req.tenant.supervisor_key),
-                    job_id: existing.job_id,
-                    technician_id: existing.technician_id,
-                    approval_status: 'pending',
-                    _id: { $ne: existing._id }
+                    job_number: existing.job_id
                 });
-                
-                const totalPendingHours = otherPending.reduce((sum, entry) => 
-                    sum + Number(entry.hours_logged || 0), 0
-                );
-                
-                // Update consumed hours with approved amount only
-                job.consumed_hours = currentConsumed + approvedHours + totalPendingHours;
-                await job.save();
+                if (job) {
+                    const approvedLogs = await TimeLog.find({
+                        ...tenantQuery(req.tenant.supervisor_key),
+                        is_idle: false,
+                        job_id: existing.job_id,
+                        technician_id: existing.technician_id,
+                        approval_status: { $in: ['approved'] }
+                    });
+
+                    const approvedSumForTech = approvedLogs.reduce(
+                        (sum, e) => sum + Number(e.approved_hours || 0),
+                        0
+                    );
+
+                    const approvedLogsAllTech = await TimeLog.find({
+                        ...tenantQuery(req.tenant.supervisor_key),
+                        is_idle: false,
+                        job_id: existing.job_id,
+                        approval_status: { $in: ['approved'] }
+                    });
+
+                    const approvedTotalForJob = approvedLogsAllTech.reduce(
+                        (sum, e) => sum + Number(e.approved_hours || 0),
+                        0
+                    );
+
+                    job.consumed_hours = Math.max(0, approvedTotalForJob);
+
+                    const tech = (job.technicians || []).find((t) =>
+                        t.technician_id && t.technician_id.toString() === String(existing.technician_id)
+                    );
+                    if (tech) {
+                        tech.consumed_hours = Math.max(0, approvedSumForTech);
+                    }
+
+                    const allocated = Number(job.allocated_hours || 0);
+                    const consumed = Number(job.consumed_hours || 0);
+                    job.remaining_hours = Math.max(0, allocated - consumed);
+                    job.overrun_hours = Math.max(0, consumed - allocated);
+                    job.progress_percentage = allocated > 0 ? Math.min(100, (consumed / allocated) * 100) : 0;
+                    job.status = computeJobStatus(job);
+
+                    const subtaskId = existing.subtask_id;
+                    if (subtaskId) {
+                        const allocation = getSubtaskAllocationForTechnician(job, subtaskId, existing.technician_id);
+                        const allocHours = Number(allocation?.allocated_hours || 0);
+                        if (allocHours > 0) {
+                            const stageApprovedLogs = await TimeLog.find({
+                                ...tenantQuery(req.tenant.supervisor_key),
+                                is_idle: false,
+                                job_id: existing.job_id,
+                                subtask_id: String(subtaskId),
+                                technician_id: existing.technician_id,
+                                approval_status: { $in: ['approved'] }
+                            });
+
+                            const stageApprovedSum = stageApprovedLogs.reduce(
+                                (sum, e) => sum + Number(e.approved_hours || 0),
+                                0
+                            );
+
+                            upsertSubtaskProgressForTechnician(
+                                job,
+                                subtaskId,
+                                existing.technician_id,
+                                (stageApprovedSum / allocHours) * 100
+                            );
+                        }
+                    }
+
+                    await job.save();
+                }
+            } catch (jobErr) {
+                console.error('Job update failed after approval (non-fatal):', jobErr.message);
             }
         }
 
-        res.json({ 
+        res.json({
             message: 'Time log approved successfully',
-            timeLog: existing 
+            timeLog: existing
         });
     } catch (error) {
         res.status(400).json({ error: error.message });
@@ -1625,30 +1685,101 @@ router.put('/:id/decline', requireSupervisor, async (req, res) => {
             return res.status(400).json({ error: 'Approval workflow is not enabled for this workshop' });
         }
 
-        const { approval_note } = req.body;
-        
-        const existing = await TimeLog.findOne({ 
-            ...tenantQuery(req.tenant.supervisor_key), 
-            _id: req.params.id 
+        const { approval_note, note } = req.body;
+        const resolvedNote = approval_note || note || '';
+
+        const existing = await TimeLog.findOne({
+            ...tenantQuery(req.tenant.supervisor_key),
+            _id: req.params.id
         });
-        
+
         if (!existing) return res.status(404).json({ error: 'Time log not found' });
-        if (existing.approval_status !== 'pending') {
-            return res.status(400).json({ error: 'Time log is not pending approval' });
+        if (existing.approval_status === 'approved') {
+            return res.status(400).json({ error: 'Time log has already been approved' });
+        }
+        if (existing.approval_status === 'declined') {
+            return res.status(400).json({ error: 'Time log is already declined' });
         }
 
-        // Update decline status
         existing.approval_status = 'declined';
         existing.approved_by = req.session.user.name || req.session.user.email;
         existing.approved_at = new Date();
-        existing.approval_note = approval_note || '';
-        
+        existing.approval_note = resolvedNote;
+
         await existing.save();
 
-        res.json({ 
+        res.json({
             message: 'Time log declined successfully',
-            timeLog: existing 
+            timeLog: existing
         });
+    } catch (error) {
+        res.status(400).json({ error: error.message });
+    }
+});
+
+// Edit time log (supervisor only — hours, category, subtask)
+router.put('/:id', requireSupervisor, async (req, res) => {
+    try {
+        const { timeLog } = req.body;
+        if (!timeLog) return res.status(400).json({ error: 'timeLog body is required' });
+
+        const existing = await TimeLog.findOne({
+            ...tenantQuery(req.tenant.supervisor_key),
+            _id: req.params.id
+        });
+        if (!existing) return res.status(404).json({ error: 'Time log not found' });
+
+        const newHours = Number(timeLog.hours_logged);
+        if (Number.isFinite(newHours) && newHours > 0) {
+            existing.hours_logged = newHours;
+            // Keep approved_hours in sync: cap at new submitted hours
+            if (existing.approval_status === 'approved') {
+                existing.approved_hours = Math.min(newHours, Number(existing.approved_hours || newHours));
+            }
+        }
+
+        // Category / detail only editable for idle entries
+        if (existing.is_idle) {
+            if (typeof timeLog.category === 'string') existing.category = timeLog.category;
+            if (typeof timeLog.category_detail === 'string') existing.category_detail = timeLog.category_detail;
+        }
+
+        if (typeof timeLog.subtask_id !== 'undefined') existing.subtask_id = timeLog.subtask_id || null;
+
+        await existing.save();
+
+        // Recompute job consumed hours so remaining / progress stay accurate
+        if (!existing.is_idle && existing.job_id) {
+            try {
+                const job = await Job.findOne({
+                    ...tenantQuery(req.tenant.supervisor_key),
+                    job_number: existing.job_id
+                });
+                if (job) {
+                    const approvedLogs = await TimeLog.find({
+                        ...tenantQuery(req.tenant.supervisor_key),
+                        is_idle: false,
+                        job_id: existing.job_id,
+                        approval_status: 'approved'
+                    });
+                    const approvedTotal = approvedLogs.reduce(
+                        (sum, e) => sum + Number(e.approved_hours || 0), 0
+                    );
+                    job.consumed_hours = Math.max(0, approvedTotal);
+                    const allocated = Number(job.allocated_hours || 0);
+                    const consumed = job.consumed_hours;
+                    job.remaining_hours = Math.max(0, allocated - consumed);
+                    job.overrun_hours = Math.max(0, consumed - allocated);
+                    job.progress_percentage = allocated > 0 ? Math.min(100, (consumed / allocated) * 100) : 0;
+                    job.status = computeJobStatus(job);
+                    await job.save();
+                }
+            } catch (jobErr) {
+                console.error('Job update after time log edit (non-fatal):', jobErr.message);
+            }
+        }
+
+        res.json({ message: 'Time log updated successfully', timeLog: existing });
     } catch (error) {
         res.status(400).json({ error: error.message });
     }
@@ -1703,15 +1834,16 @@ router.post('/', requireAuth, async (req, res) => {
                 if (isIdle) {
                     if (jobId !== IDLE_JOB_ID) continue;
                     if (!category || !(TimeLog.IDLE_CATEGORIES || []).includes(category)) continue;
+                    if (category === 'Idle' && !String(categoryDetail || '').trim()) continue;
                     if (category === 'Other' && !String(categoryDetail || '').trim()) continue;
                 }
 
                 const logDate = TimeLog.normalizeLogDate(entryDate);
                 const { start, end } = getDayRange(logDate);
 
-                // Check daily total
+                // Check daily total — no supervisor_key filter so cross-workshop entries
+                // count toward the daily cap correctly.
                 const existingDayLogs = await TimeLog.find({
-                    ...tenantQuery(req.tenant.supervisor_key),
                     technician_id: technicianId,
                     log_date: { $gte: start, $lt: end }
                 });
@@ -1840,27 +1972,54 @@ router.post('/', requireAuth, async (req, res) => {
             if (!category || !(TimeLog.IDLE_CATEGORIES || []).includes(category)) {
                 return res.status(400).json({ error: 'Valid category is required for idle logs' });
             }
+            if (category === 'Idle' && !String(categoryDetail || '').trim()) {
+                return res.status(400).json({ error: 'A sub-reason is required when category is Idle' });
+            }
             if (category === 'Other' && !String(categoryDetail || '').trim()) {
                 return res.status(400).json({ error: 'category_detail is required when category is Other' });
             }
         }
 
         const logDate = TimeLog.normalizeLogDate(entryDate);
-        const { start, end } = getDayRange(logDate);   // ← Now works!
+        const { start, end } = getDayRange(logDate);
 
-        // Check daily total
+        // Fetch existing day logs across all workshops so cross-workshop entries
+        // count toward the daily cap and duplicate-merge works correctly.
         const existingDayLogs = await TimeLog.find({
-            ...tenantQuery(req.tenant.supervisor_key),
             technician_id: technicianId,
             log_date: { $gte: start, $lt: end }
         });
 
-        const totalForDay = existingDayLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
-        if ((totalForDay + hoursLogged) > 24 + 1e-9) {
-            return res.status(400).json({ error: 'Cannot log more than 24 hours in a day' });
+        // Leave/sick entries bypass both the absence-day block and the productive-hours cap.
+        // They record attendance, not productive work, so the normal 7.5-hour limit does not apply.
+        const isSickOrLeaveEntry = isLeave || (isIdle && (category === 'Leave' || category === 'Sick'));
+        if (!isSickOrLeaveEntry) {
+            const isAbsenceDay = await AttendanceRecord.isAbsenceDay(req.tenant.supervisor_key, technicianId, logDate);
+            if (isAbsenceDay) {
+                const absenceDetails = await AttendanceRecord.getAbsenceDetails(req.tenant.supervisor_key, technicianId, logDate);
+                return res.status(400).json({
+                    error: `Cannot log hours on ${absenceDetails.type} day`,
+                    absence_type: absenceDetails.type,
+                    hours_credited: absenceDetails.hours,
+                    date: absenceDetails.date
+                });
+            }
+
+            // Enforce productive-hours cap (7.5 Mon-Thu, 6 Friday)
+            const availableProductiveHours = await timeAllocationService.getAvailableProductiveHours(logDate);
+            const totalForDay = existingDayLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+            if ((totalForDay + hoursLogged) > availableProductiveHours + 1e-9) {
+                return res.status(400).json({
+                    error: `Cannot log more than ${availableProductiveHours} productive hours on this day`,
+                    available_hours: availableProductiveHours,
+                    already_logged: totalForDay,
+                    requested: hoursLogged,
+                    remaining: Math.max(0, availableProductiveHours - totalForDay)
+                });
+            }
         }
 
-        const existingSameJob = existingDayLogs.find((e) => 
+        const existingSameJob = existingDayLogs.find((e) =>
             String(e.job_id) === String(jobId) && 
             String(e.subtask_id || '') === String(subtaskId || '')
         );
@@ -1870,18 +2029,26 @@ router.post('/', requireAuth, async (req, res) => {
         let jobForCheck = null;
 
         if (!isIdle) {
+            // First look in own supervisor's workshop, then cross-workshop (global assignment)
             jobForCheck = await Job.findOne({
                 ...tenantQuery(req.tenant.supervisor_key),
                 job_number: jobId
             });
+            if (!jobForCheck) {
+                jobForCheck = await Job.findOne({
+                    job_number: jobId,
+                    $or: [
+                        { 'technicians.technician_id': technicianId },
+                        { 'subtasks.assigned_technicians.technician_id': technicianId }
+                    ]
+                });
+            }
 
             if (!jobForCheck) return res.status(400).json({ error: 'Job not found' });
 
-            // ... (keep your full job assignment and remaining hours validation logic here) ...
-
-            // Example:
-            const consumedForJob = needsApproval 
-                ? await sumSubmittedJobHours({ supervisorKey: req.tenant.supervisor_key, jobId })
+            const effectiveSupervisorKey = jobForCheck.supervisor_key || req.tenant.supervisor_key;
+            const consumedForJob = needsApproval
+                ? await sumSubmittedJobHours({ supervisorKey: effectiveSupervisorKey, jobId })
                 : Number(jobForCheck.consumed_hours || 0);
 
             const remaining = Math.max(0, Number(jobForCheck.allocated_hours || 0) - consumedForJob);
@@ -1889,6 +2056,12 @@ router.post('/', requireAuth, async (req, res) => {
                 return res.status(400).json({ error: 'Not enough remaining hours on this job' });
             }
         }
+
+        // Determine where the time log belongs: use job's workshop so the owning
+        // supervisor can see and approve it (important for cross-workshop assignment)
+        const effectiveKey = (jobForCheck && jobForCheck.supervisor_key)
+            ? jobForCheck.supervisor_key
+            : req.tenant.supervisor_key;
 
         // Create or merge entry
         let entry;
@@ -1910,7 +2083,7 @@ router.post('/', requireAuth, async (req, res) => {
             entry = await existingSameJob.save();
         } else {
             entry = new TimeLog({
-                supervisor_key: req.tenant.supervisor_key,
+                supervisor_key: effectiveKey,
                 technician_id: technicianId,
                 job_id: jobId,
                 subtask_id: isIdle ? null : String(subtaskId),
@@ -1976,7 +2149,9 @@ router.get('/', requireAuth, async (req, res) => {
         }
 
         if (req.session.user?.type === 'technician') {
+            // Technicians may have cross-workshop time logs — query by id only, no supervisor_key filter
             query.technician_id = req.session.user.id;
+            delete query.supervisor_key;
         }
 
         const entries = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(500);
@@ -2006,7 +2181,8 @@ router.get('/idle-categories', requireAuth, async (req, res) => {
     try {
         res.json({
             job_id: IDLE_JOB_ID,
-            categories: TimeLog.IDLE_CATEGORIES || []
+            categories: TimeLog.ENTRY_CATEGORIES || TimeLog.IDLE_CATEGORIES || [],
+            idle_sub_reasons: TimeLog.IDLE_SUB_REASONS || [],
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -2150,7 +2326,12 @@ const sumSubmittedJobHours = async ({ supervisorKey, jobId }) => {
 // Delete a time log
 router.delete('/:id', requireAuth, async (req, res) => {
     try {
-        const existing = await TimeLog.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id });
+        // Technicians may own cross-workshop logs (saved under job's supervisor_key),
+        // so skip the tenant scope when the caller is a technician.
+        const deleteQuery = req.session.user?.type === 'technician'
+            ? { _id: req.params.id }
+            : { ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id };
+        const existing = await TimeLog.findOne(deleteQuery);
         if (!existing) return res.status(404).json({ error: 'Time log not found' });
         const deny = requireSelfOrSupervisor(req, res, existing.technician_id);
         if (deny) return;
