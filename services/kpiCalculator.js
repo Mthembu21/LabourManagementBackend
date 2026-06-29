@@ -2517,20 +2517,23 @@ function buildKpis({
   nonProductive,
   idle,
   training,
-  scheduledHours  // optional: if provided, availability = availableHours/scheduledHours*100
+  scheduledHours,              // ALL active techs — used for availability denominator
+  scheduledHoursForUtilization // participants only — used for utilization denominator
 }, context) {
   // Guardrail: ensure callers cannot pass undefined and rely on JS coercion.
   // Any non-finite number will be caught by validateAndFreezeKpis().
 
   // utilization = (productive + training) / scheduled_hours
-  // Scheduled hours (8.5 Mon–Thu, 7 Fri) is the denominator so leave/sick days
-  // still count in the baseline — utilization reflects full-day usage honestly.
-  // Falls back to availableProductiveHours for daily/weekly/monthly callers that
-  // do not yet supply scheduledHours (preserves their existing behaviour).
+  // Use participant-scoped scheduled hours when provided so that active-but-not-logging
+  // technicians do not silently inflate the denominator and suppress the team %.
+  // Falls back to scheduledHours, then availableProductiveHours for backward compat.
   const utilizationNumerator = (productive || 0) + (training || 0);
-  const utilizationDenominator = (scheduledHours != null && scheduledHours > 0)
-    ? scheduledHours
-    : (availableProductiveHours || 0);
+  const utilizationDenominator =
+    (scheduledHoursForUtilization != null && scheduledHoursForUtilization > 0)
+      ? scheduledHoursForUtilization
+      : (scheduledHours != null && scheduledHours > 0)
+      ? scheduledHours
+      : (availableProductiveHours || 0);
 
   const utilization_percent = utilizationDenominator > 0
     ? (utilizationNumerator / utilizationDenominator) * 100
@@ -3224,11 +3227,36 @@ class KPICalculator {
       totalNotAvailableHours   += td.not_available_hours || 0;
     }
 
+    // ── Participant-scoped denominators ───────────────────────────────────────────
+    // techSet includes ALL active technicians (needed for correct availability %).
+    // But technicians who have zero logs AND zero absence records in this period
+    // are "ghosts" — they inflate the utilization/productivity denominators without
+    // contributing to numerators, silently suppressing the team percentages.
+    // Scope utilization/productivity denominators to participants only.
+    const participantSet = new Set([
+      ...timeLogs.map(e => String(e.technician_id)),
+      ...absenceRecords.map(r => String(r.technician_id))
+    ]);
+
+    let participantScheduled          = 0;
+    let participantEffectiveAvailable = 0;
+    let participantAvailableProductive = 0;
+    for (const [techId, td] of techDetailsMap.entries()) {
+      if (!participantSet.has(techId)) continue;
+      participantScheduled           += td.scheduled_hours;
+      participantEffectiveAvailable  += td.available_hours;
+      participantAvailableProductive += td.available_productive_hours;
+    }
+
     console.log('[KPI DEBUG] Aggregation result (re-derived from breakdown)', {
       techs: techDetailsMap.size,
+      participants: participantSet.size,
       totalScheduled,
+      participantScheduled,
       totalEffectiveAvailable,
+      participantEffectiveAvailable,
       totalAvailableProductive,
+      participantAvailableProductive,
       totalProductive,
       totalNonProductive,
       totalIdle,
@@ -3255,13 +3283,14 @@ class KPICalculator {
       });
 
     const kpis = buildKpis({
-      availableHours: totalEffectiveAvailable,
-      availableProductiveHours: totalAvailableProductive,
+      availableHours: participantEffectiveAvailable,
+      availableProductiveHours: participantAvailableProductive,
       productive: totalProductive,
       nonProductive: totalNonProductive,
       idle: totalIdle,
       training: totalTraining,
-      scheduledHours: totalScheduled
+      scheduledHours: totalScheduled,               // ALL active techs → availability is correct
+      scheduledHoursForUtilization: participantScheduled  // participants only → utilization/productivity are correct
     }, 'dashboard');
 
     // Include leave/sick hours so a leave-only day is still counted as "has data"
