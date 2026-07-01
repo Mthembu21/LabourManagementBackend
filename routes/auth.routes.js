@@ -88,7 +88,7 @@ async function ensureSupervisorsSeeded() {
         },
         {
             supervisor_key: 'kathu',
-            email: 'kathu.login@epiroc.com',
+            email: 'kathu@epiroc.com',
             password: '2026!',
             role: 'supervisor',
             access: ['components']

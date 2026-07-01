@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const monthlyArchiveSchema = new mongoose.Schema({
     supervisor_key: {
         type: String,
-        enum: ['component', 'rebuild', 'pdis'],
+        enum: ['component', 'rebuild', 'pdis', 'kathu'],
         default: 'component',
         index: true
     },

@@ -50,7 +50,7 @@ const HOUR_CATEGORIES = TIME_CATEGORIES;
 const timeLogSchema = new mongoose.Schema({
     supervisor_key: {
         type: String,
-        enum: ['component', 'rebuild', 'pdis'],
+        enum: ['component', 'rebuild', 'pdis', 'kathu'],
         default: 'component',
         index: true
     },
@@ -175,7 +175,7 @@ const timeLogSchema = new mongoose.Schema({
     },
     original_supervisor_key: {
         type: String,
-        enum: ['component', 'rebuild', 'pdis', null],
+        enum: ['component', 'rebuild', 'pdis', 'kathu', null],
         default: null
     },
     time_category: {

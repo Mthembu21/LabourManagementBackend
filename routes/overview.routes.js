@@ -33,12 +33,13 @@ const requireManager = (req, res, next) => {
 const keyToLabel = {
     component: 'Components',
     pdis: 'PDI',
-    rebuild: 'Rebuild'
+    rebuild: 'Rebuild',
+    kathu: 'Kathu'
 };
 
 router.get('/workshop', requireAuth, requireManager, async (req, res) => {
     try {
-        const keys = ['component', 'pdis', 'rebuild'];
+        const keys = ['component', 'pdis', 'rebuild', 'kathu'];
 
         const month = req.query?.month ? String(req.query.month) : '';
         const range = getMonthRange(month);

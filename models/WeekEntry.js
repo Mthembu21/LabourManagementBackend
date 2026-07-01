@@ -57,7 +57,7 @@ const weekDayAggregateSchema = new mongoose.Schema({
 const weekEntrySchema = new mongoose.Schema({
     supervisor_key: {
         type: String,
-        enum: ['component', 'rebuild', 'pdis'],
+        enum: ['component', 'rebuild', 'pdis', 'kathu'],
         default: 'component',
         index: true
     },

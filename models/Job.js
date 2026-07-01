@@ -98,7 +98,7 @@ const subtaskSchema = new mongoose.Schema({
 const jobSchema = new mongoose.Schema({
     supervisor_key: {
         type: String,
-        enum: ['component', 'rebuild', 'pdis'],
+        enum: ['component', 'rebuild', 'pdis', 'kathu'],
         default: 'component',
         index: true
     },

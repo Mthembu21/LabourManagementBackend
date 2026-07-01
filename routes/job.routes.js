@@ -686,6 +686,23 @@ router.put('/by-job/:jobNumber/confirm', requireAuth, async (req, res) => {
                 ]
             });
         }
+
+        // Fallback for temporarily assigned (global) technicians: the job lives in a
+        // different workshop so tenantQuery misses it. Search cross-workshop but only
+        // where this technician is actually assigned — no privilege escalation.
+        if (!job && req.session?.user?.type === 'technician') {
+            job = await Job.findOne({
+                job_number: req.params.jobNumber,
+                'technicians.technician_id': String(technicianId)
+            });
+            if (!job && mongoose.Types.ObjectId.isValid(String(req.params.jobNumber))) {
+                job = await Job.findOne({
+                    _id: req.params.jobNumber,
+                    'technicians.technician_id': String(technicianId)
+                });
+            }
+        }
+
         if (!job) return res.status(404).json({ error: 'Job not found' });
 
         const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(technicianId));

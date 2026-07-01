@@ -8,12 +8,12 @@ const temporaryAssignmentSchema = new mongoose.Schema({
     },
     original_supervisor_key: {
         type: String,
-        enum: ['component', 'rebuild', 'pdis'],
+        enum: ['component', 'rebuild', 'pdis', 'kathu'],
         required: true
     },
     temporary_supervisor_key: {
         type: String,
-        enum: ['component', 'rebuild', 'pdis'],
+        enum: ['component', 'rebuild', 'pdis', 'kathu'],
         required: true
     },
     assigned_at: {

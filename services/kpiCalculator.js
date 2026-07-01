@@ -3283,14 +3283,14 @@ class KPICalculator {
       });
 
     const kpis = buildKpis({
-      availableHours: participantEffectiveAvailable,
-      availableProductiveHours: participantAvailableProductive,
+      availableHours: totalEffectiveAvailable,           // ALL active techs → availability numerator is correct
+      availableProductiveHours: participantAvailableProductive, // participants only → productivity denominator
       productive: totalProductive,
       nonProductive: totalNonProductive,
       idle: totalIdle,
       training: totalTraining,
-      scheduledHours: totalScheduled,               // ALL active techs → availability is correct
-      scheduledHoursForUtilization: participantScheduled  // participants only → utilization/productivity are correct
+      scheduledHours: totalScheduled,                    // ALL active techs → availability denominator
+      scheduledHoursForUtilization: participantScheduled // participants only → utilization denominator
     }, 'dashboard');
 
     // Include leave/sick hours so a leave-only day is still counted as "has data"
