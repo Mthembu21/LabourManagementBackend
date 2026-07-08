@@ -1,5 +1,6 @@
 const express = require('express');
 const session = require('express-session');
+const MongoStore = require('connect-mongo');
 const cors = require('cors');
 require('dotenv').config();
 
@@ -81,6 +82,11 @@ const useCrossSiteCookies = isRender || process.env.NODE_ENV === "production";
 
 app.use(session({
   secret: process.env.SESSION_SECRET || "epiroc-workshop-secret",
+  store: MongoStore.create({
+    mongoUrl: process.env.MONGODB_URI,
+    collectionName: "sessions",
+    ttl: 24 * 60 * 60 // 24 hours, in seconds
+  }),
   resave: false,
   saveUninitialized: false,
   cookie: {

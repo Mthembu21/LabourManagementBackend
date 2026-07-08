@@ -1136,55 +1136,18 @@ router.post('/', requireSupervisor, async (req, res) => {
         const body = req.body || {};
         const technicians = Array.isArray(body.technicians) ? body.technicians : [];
 
-        // If job_number already exists, treat this as "assign another technician" instead of creating a new job
+        // Reject outright if job_number already exists in this tenant, instead of silently
+        // repurposing the request as a technician assignment on the old job (which used to
+        // discard the newly submitted description/hours/dates/subtasks with no error shown).
         if (body.job_number) {
             const existingJob = await Job.findOne({
                 ...tenantQuery(req.tenant.supervisor_key),
                 job_number: body.job_number
             });
             if (existingJob) {
-                const technicianId = body.assigned_technician_id || body.technicians?.[0]?.technician_id;
-                let technicianName = body.assigned_technician_name || body.technicians?.[0]?.technician_name || '';
-
-                if (!technicianId) {
-                    return res.status(409).json({
-                        error: 'Job number already exists. Provide a technician to assign to this existing job.'
-                    });
-                }
-
-                if (!technicianName) {
-                    const tech = await Technician.findById(technicianId);
-                    if (!tech) return res.status(400).json({ error: 'Technician not found' });
-                    technicianName = tech.name;
-                }
-
-                // ✅ Use safe assignment logic instead
-                try {
-                    await assignTechnicianToJob(existingJob._id, technicianId, technicianName);
-                } catch (error) {
-                    // Technician already assigned - continue
-                }
-
-                // Do not block other technicians by resetting an already-active job back to pending_confirmation
-                if (!existingJob.status) {
-                    existingJob.status = 'pending_confirmation';
-                }
-                await existingJob.save();
-
-                const enriched = await enrichJobsWithTimeLogProgress([existingJob], req.tenant.supervisor_key);
-                return res.json(enriched[0]);
-            }
-        }
-
-        // ✅ Handle single technician assignment with safe logic
-        if (!technicians.length && body.assigned_technician_id) {
-            const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: body.job_number });
-            if (job) {
-                try {
-                    await assignTechnicianToJob(job._id, body.assigned_technician_id, body.assigned_technician_name || '');
-                } catch (error) {
-                    // Technician already assigned - continue
-                }
+                return res.status(409).json({
+                    error: `Job number "${body.job_number}" already exists. Choose a different job number.`
+                });
             }
         }
 
