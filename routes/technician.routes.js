@@ -64,14 +64,20 @@ router.get('/search', requireAuth, async (req, res) => {
         const searchRegex = { $regex: q || '', $options: 'i' };
         
         const technicians = await Technician.find({
-            $or: [
-                { name: searchRegex },
-                { employee_id: searchRegex },
-                { employeeNumber: searchRegex }
-            ],
-            $or: [
-                { isActive: true },
-                { isActive: { $exists: false } } // Include technicians without isActive field
+            $and: [
+                {
+                    $or: [
+                        { name: searchRegex },
+                        { employee_id: searchRegex },
+                        { employeeNumber: searchRegex }
+                    ]
+                },
+                {
+                    $or: [
+                        { isActive: true },
+                        { isActive: { $exists: false } } // Include technicians without isActive field
+                    ]
+                }
             ]
         });
         
