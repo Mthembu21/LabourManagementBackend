@@ -2517,23 +2517,25 @@ function buildKpis({
   nonProductive,
   idle,
   training,
-  scheduledHours,              // ALL active techs — used for availability denominator
-  scheduledHoursForUtilization // participants only — used for utilization denominator
+  scheduledHours,               // ALL active techs — used for availability denominator
+  availableHoursForUtilization  // participants only, leave-adjusted — used for utilization denominator
 }, context) {
   // Guardrail: ensure callers cannot pass undefined and rely on JS coercion.
   // Any non-finite number will be caught by validateAndFreezeKpis().
 
-  // utilization = (productive + training) / scheduled_hours
-  // Use participant-scoped scheduled hours when provided so that active-but-not-logging
+  // utilization = (productive + training) / available_hours
+  // Available hours = scheduled hours minus approved leave/sick time, so a technician
+  // on leave isn't counted as "available but idle" and dragging the % down.
+  // Use participant-scoped, leave-adjusted hours when provided so that active-but-not-logging
   // technicians do not silently inflate the denominator and suppress the team %.
-  // Falls back to scheduledHours, then availableProductiveHours for backward compat.
+  // Falls back to availableProductiveHours (already leave-adjusted), then raw scheduledHours.
   const utilizationNumerator = (productive || 0) + (training || 0);
   const utilizationDenominator =
-    (scheduledHoursForUtilization != null && scheduledHoursForUtilization > 0)
-      ? scheduledHoursForUtilization
-      : (scheduledHours != null && scheduledHours > 0)
-      ? scheduledHours
-      : (availableProductiveHours || 0);
+    (availableHoursForUtilization != null && availableHoursForUtilization > 0)
+      ? availableHoursForUtilization
+      : (availableProductiveHours != null && availableProductiveHours > 0)
+      ? availableProductiveHours
+      : (scheduledHours || 0);
 
   const utilization_percent = utilizationDenominator > 0
     ? (utilizationNumerator / utilizationDenominator) * 100
@@ -3171,7 +3173,6 @@ class KPICalculator {
     for (const techDetail of techDetailsMap.values()) {
       const avProd = techDetail.available_productive_hours;
       const avHrs  = techDetail.available_hours;
-      const sched  = techDetail.scheduled_hours;
       const prod   = techDetail.productive_hours;
       const train  = techDetail.training_hours;
       const np     = techDetail.non_productive_hours;
@@ -3179,8 +3180,10 @@ class KPICalculator {
       const totalLogged = prod + train + np + idle;
 
       techDetail.productivity_percent   = avProd > 0 ? _round((prod / avProd) * 100) : 0;
-      // Utilization uses scheduled_hours (8.5/7 h) so leave days stay in denominator
-      techDetail.utilization_percent    = sched  > 0 ? _round(((prod + train) / sched) * 100) : 0;
+      // Utilization uses available_hours (scheduled minus approved leave/sick), so a
+      // technician on leave isn't counted as available-but-unutilized and doesn't
+      // drag down their (or the team's) utilization %.
+      techDetail.utilization_percent    = avHrs  > 0 ? _round(((prod + train) / avHrs) * 100) : 0;
       techDetail.efficiency_percent     = totalLogged > 0 ? _round((prod / totalLogged) * 100) : 0;
       // Non-productive % uses available productive hours (7.5/6) as denominator, not total scheduled (8.5/7)
       techDetail.non_productive_percent = avProd > 0 ? _round(((np + idle + train) / avProd) * 100) : 0;
@@ -3269,6 +3272,7 @@ class KPICalculator {
       .map(d => {
         const avProd = d.availableProductive;
         const sched  = d.scheduledHours;
+        const avHrs  = d.effectiveAvailable;
         return {
           date: d.date,
           productiveHours: _round(d.productiveHours),
@@ -3278,7 +3282,9 @@ class KPICalculator {
           scheduledHours: _round(sched),
           trainingHours: _round(d.trainingHours),
           productivity_percent: avProd > 0 ? _round((d.productiveHours / avProd) * 100) : 0,
-          utilization_percent: sched  > 0 ? _round(((d.productiveHours + d.trainingHours) / sched) * 100) : 0,
+          // Denominator is available hours (scheduled minus approved leave/sick), not raw
+          // scheduled hours, so leave days don't drag down the reported utilization %.
+          utilization_percent: avHrs  > 0 ? _round(((d.productiveHours + d.trainingHours) / avHrs) * 100) : 0,
         };
       });
 
@@ -3289,8 +3295,8 @@ class KPICalculator {
       nonProductive: totalNonProductive,
       idle: totalIdle,
       training: totalTraining,
-      scheduledHours: totalScheduled,                    // ALL active techs → availability denominator
-      scheduledHoursForUtilization: participantScheduled // participants only → utilization denominator
+      scheduledHours: totalScheduled,                              // ALL active techs → availability denominator
+      availableHoursForUtilization: participantEffectiveAvailable  // participants only, leave-adjusted → utilization denominator
     }, 'dashboard');
 
     // Include leave/sick hours so a leave-only day is still counted as "has data"
