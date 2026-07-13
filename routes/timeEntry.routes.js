@@ -1742,6 +1742,15 @@ router.put('/:id', requireSupervisor, async (req, res) => {
         if (existing.is_idle) {
             if (typeof timeLog.category === 'string') existing.category = timeLog.category;
             if (typeof timeLog.category_detail === 'string') existing.category_detail = timeLog.category_detail;
+            if (typeof timeLog.category_note === 'string') existing.category_note = timeLog.category_note;
+
+            if (
+                existing.category === 'Idle' &&
+                (TimeLog.IDLE_SUB_REASONS_REQUIRING_NOTE || []).includes(existing.category_detail) &&
+                !String(existing.category_note || '').trim()
+            ) {
+                return res.status(400).json({ error: `Please explain what you were doing during "${existing.category_detail}" idle time` });
+            }
         }
 
         if (typeof timeLog.subtask_id !== 'undefined') existing.subtask_id = timeLog.subtask_id || null;
@@ -1957,6 +1966,7 @@ router.post('/', requireAuth, async (req, res) => {
 
         const category = payload?.category ?? null;
         const categoryDetail = typeof payload?.category_detail === 'string' ? payload.category_detail : '';
+        const categoryNote = typeof payload?.category_note === 'string' ? payload.category_note : '';
         const isLeave = !!payload?.is_leave;
 
         // Validations
@@ -1977,6 +1987,13 @@ router.post('/', requireAuth, async (req, res) => {
             }
             if (category === 'Other' && !String(categoryDetail || '').trim()) {
                 return res.status(400).json({ error: 'category_detail is required when category is Other' });
+            }
+            if (
+                category === 'Idle' &&
+                (TimeLog.IDLE_SUB_REASONS_REQUIRING_NOTE || []).includes(categoryDetail) &&
+                !String(categoryNote || '').trim()
+            ) {
+                return res.status(400).json({ error: `Please explain what you were doing during "${categoryDetail}" idle time` });
             }
         }
 
@@ -2070,6 +2087,7 @@ router.post('/', requireAuth, async (req, res) => {
             existingSameJob.is_idle = isIdle;
             existingSameJob.category = isIdle ? category : null;
             existingSameJob.category_detail = isIdle ? String(categoryDetail || '') : '';
+            existingSameJob.category_note = isIdle ? String(categoryNote || '') : '';
             existingSameJob.subtask_id = isIdle ? null : String(subtaskId);
             existingSameJob.subtask_title = isIdle ? null : resolvedSubtaskTitle;
             existingSameJob.is_leave = isLeave;
@@ -2092,6 +2110,7 @@ router.post('/', requireAuth, async (req, res) => {
                 log_date: logDate,
                 category: isIdle ? category : null,
                 category_detail: isIdle ? String(categoryDetail || '') : '',
+                category_note: isIdle ? String(categoryNote || '') : '',
                 is_idle: isIdle,
                 is_leave: isLeave,
                 approval_status: defaultStatus,
@@ -2183,6 +2202,7 @@ router.get('/idle-categories', requireAuth, async (req, res) => {
             job_id: IDLE_JOB_ID,
             categories: TimeLog.ENTRY_CATEGORIES || TimeLog.IDLE_CATEGORIES || [],
             idle_sub_reasons: TimeLog.IDLE_SUB_REASONS || [],
+            idle_sub_reasons_requiring_note: TimeLog.IDLE_SUB_REASONS_REQUIRING_NOTE || [],
         });
     } catch (error) {
         res.status(500).json({ error: error.message });

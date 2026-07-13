@@ -35,6 +35,13 @@ const IDLE_SUB_REASONS = [
     'Other',
 ];
 
+// Idle sub-reasons that have no job number to describe the work performed,
+// so the technician must explain in category_note what they actually did.
+const IDLE_SUB_REASONS_REQUIRING_NOTE = [
+    'Housekeeping',
+    'Other',
+];
+
 // Strict time classification system for operational planning
 const TIME_CATEGORIES = {
     PRODUCTIVE: 'productive',           // Job/work order booked hours (value-adding)
@@ -90,6 +97,13 @@ const timeLogSchema = new mongoose.Schema({
         default: null
     },
     category_detail: {
+        type: String,
+        default: ''
+    },
+    // Free-text explanation of what the technician actually did while idle.
+    // Required when category = 'Idle' and category_detail is 'Housekeeping' or 'Other',
+    // since those reasons have no job number to describe the work.
+    category_note: {
         type: String,
         default: ''
     },
@@ -203,6 +217,7 @@ timeLogSchema.index(
 timeLogSchema.statics.IDLE_CATEGORIES = IDLE_CATEGORIES;
 timeLogSchema.statics.ENTRY_CATEGORIES = ENTRY_CATEGORIES;
 timeLogSchema.statics.IDLE_SUB_REASONS = IDLE_SUB_REASONS;
+timeLogSchema.statics.IDLE_SUB_REASONS_REQUIRING_NOTE = IDLE_SUB_REASONS_REQUIRING_NOTE;
 timeLogSchema.statics.HOUR_CATEGORIES = HOUR_CATEGORIES;
 timeLogSchema.statics.TIME_CATEGORIES = TIME_CATEGORIES;
 
