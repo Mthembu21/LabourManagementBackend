@@ -1281,11 +1281,10 @@ router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
             job.subtasks = normalizeSubtasksInput(body.subtasks);
         }
 
-        const totalSubtaskAllocated = (job.subtasks || []).reduce((sum, st) => sum + Number(st.allocated_hours || 0), 0);
-        const jobAllocated = Number(job.allocated_hours || 0);
-        if (Number.isFinite(jobAllocated) && jobAllocated > 0 && totalSubtaskAllocated > jobAllocated) {
-            return res.status(400).json({ error: 'Sum of subtask allocated hours cannot exceed job allocated hours' });
-        }
+        // Reconciling subtask allocations against the job's overall allocated_hours is
+        // left to the supervisor to do deliberately, not enforced here — otherwise any
+        // unrelated edit (e.g. removing a technician) gets blocked by a pre-existing
+        // mismatch it had nothing to do with.
 
         job.audit_history = Array.isArray(job.audit_history) ? job.audit_history : [];
         job.audit_history.push({
@@ -1427,12 +1426,8 @@ router.post('/by-job/:jobNumber/subtasks', requireSupervisor, async (req, res) =
         const alloc = Number(allocated_hours || 0);
         const newAllocated = Number.isFinite(alloc) ? Math.max(0, alloc) : 0;
 
-        const candidateSubtasks = [...(job.subtasks || []), { allocated_hours: newAllocated }];
-        const totalSubtaskAllocated = candidateSubtasks.reduce((sum, st) => sum + Number(st.allocated_hours || 0), 0);
-        const jobAllocated = Number(job.allocated_hours || 0);
-        if (Number.isFinite(jobAllocated) && jobAllocated > 0 && totalSubtaskAllocated > jobAllocated) {
-            return res.status(400).json({ error: 'Sum of subtask allocated hours cannot exceed job allocated hours' });
-        }
+        // Reconciling subtask allocations against the job's overall allocated_hours is
+        // left to the supervisor to do deliberately, not enforced here.
 
         const assigned = Array.isArray(assigned_technicians) ? assigned_technicians : [];
         const assignedNorm = assigned
@@ -1483,11 +1478,8 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId', requireSupervisor, async (r
                 }));
         }
 
-        const totalSubtaskAllocated = (job.subtasks || []).reduce((sum, s) => sum + Number(s.allocated_hours || 0), 0);
-        const jobAllocated = Number(job.allocated_hours || 0);
-        if (Number.isFinite(jobAllocated) && jobAllocated > 0 && totalSubtaskAllocated > jobAllocated) {
-            return res.status(400).json({ error: 'Sum of subtask allocated hours cannot exceed job allocated hours' });
-        }
+        // Reconciling subtask allocations against the job's overall allocated_hours is
+        // left to the supervisor to do deliberately, not enforced here.
 
         await job.save();
         const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
