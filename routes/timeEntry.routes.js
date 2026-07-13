@@ -369,6 +369,13 @@ const computeJobStatus = (jobDoc) => {
 
     if (Boolean(jobDoc.completed)) return 'completed';
 
+    // Check overrun before the 100%-progress shortcut below: progress is capped at
+    // 100%, so an overrun job (consumed > allocated) always reads as "100% complete"
+    // and would otherwise be misclassified as 'completed' instead of 'overrun'.
+    const allocated = Number(jobDoc.allocated_hours || 0);
+    const consumed = Number(jobDoc.consumed_hours || 0);
+    if (allocated > 0 && consumed > allocated) return 'overrun';
+
     const derivedPct = Number(
         jobDoc.aggregated_progress_percentage ?? jobDoc.progress_percentage ?? 0
     );
@@ -376,10 +383,6 @@ const computeJobStatus = (jobDoc) => {
 
     // Don't auto-complete based on consumed hours alone - let stage completion handle this
     // This prevents jobs from disappearing when hours are partially booked
-    const allocated = Number(jobDoc.allocated_hours || 0);
-    const consumed = Number(jobDoc.consumed_hours || 0);
-
-    if (allocated > 0 && consumed > allocated) return 'overrun';
 
     const today = normalizeDayOnly(new Date());
     const target = jobDoc.target_completion_date ? normalizeDayOnly(jobDoc.target_completion_date) : null;

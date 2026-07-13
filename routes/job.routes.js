@@ -332,16 +332,19 @@ function computeDerivedStatus(jobObj) {
 
     if (Boolean(jobObj.completed)) return 'completed';
 
+    // Check overrun before the 100%-progress shortcut below: progress is capped at
+    // 100%, so an overrun job (consumed > allocated) always reads as "100% complete"
+    // and would otherwise be misclassified as 'completed' instead of 'overrun'.
+    const allocated = Number(jobObj.allocated_hours || 0);
+    const consumed = Number(jobObj.consumed_hours || 0);
+    if (allocated > 0 && consumed > allocated) return 'overrun';
+
     const derivedPct = Number(
         jobObj.aggregated_progress_percentage ?? jobObj.progress_percentage ?? 0
     );
     if (derivedPct >= 100 - 1e-9) return 'completed';
 
-    const allocated = Number(jobObj.allocated_hours || 0);
-    const consumed = Number(jobObj.consumed_hours || 0);
-
     if (allocated > 0 && consumed >= allocated - 1e-9) return 'completed';
-    if (allocated > 0 && consumed > allocated) return 'overrun';
 
     if (Number(jobObj.bottleneck_count || 0) >= 2) return 'at_risk';
 
