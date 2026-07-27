@@ -365,9 +365,12 @@ const getSubtaskAllocationForTechnician = (jobDoc, subtaskId, technicianId) => {
 
 const computeJobStatus = (jobDoc) => {
     if (!jobDoc) return 'in_progress';
-    if (jobDoc.status === 'completed') return 'completed';
 
-    if (Boolean(jobDoc.completed)) return 'completed';
+    // Deliberately NOT trusting a stored status === 'completed' here — see the matching
+    // note on computeDerivedStatus in job.routes.js. Trusting the old value made
+    // completion a one-way trap: once a job's status ever read 'completed', every later
+    // hours edit became a no-op that just re-confirmed 'completed' regardless of the
+    // new numbers. Genuine completion is still correctly derived below.
 
     // Check overrun before the 100%-progress shortcut below: progress is capped at
     // 100%, so an overrun job (consumed > allocated) always reads as "100% complete"

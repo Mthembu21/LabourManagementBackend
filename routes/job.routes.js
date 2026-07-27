@@ -328,9 +328,16 @@ function computeAtRiskInfo(jobObj) {
 
 function computeDerivedStatus(jobObj) {
     if (!jobObj) return 'in_progress';
-    if (jobObj.status === 'completed') return 'completed';
 
-    if (Boolean(jobObj.completed)) return 'completed';
+    // Deliberately NOT trusting a stored status === 'completed' here: this function
+    // recomputes status FROM the current numbers every time hours change, and the Job
+    // schema has no separate "explicitly marked done" flag distinct from this same
+    // status field. Trusting the old value as ground truth made completion a one-way
+    // trap — once a job's status ever read 'completed' (including from past bugs),
+    // every later hours edit became a no-op that just re-confirmed 'completed'
+    // regardless of the new allocated/consumed numbers, hiding the job from the active
+    // list even after a supervisor raised its allocated hours to fix it. Genuine
+    // completion is still correctly derived below from progress % / consumed hours.
 
     // Check overrun before the 100%-progress shortcut below: progress is capped at
     // 100%, so an overrun job (consumed > allocated) always reads as "100% complete"
@@ -1261,12 +1268,15 @@ router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
         }
 
         const prevAllocated = Number(job.allocated_hours || 0);
+        let allocatedHoursChanged = false;
+        const hoursChangeReason = typeof body.hours_change_reason === 'string' ? body.hours_change_reason.trim() : '';
         if (Object.prototype.hasOwnProperty.call(body, 'allocated_hours')) {
             const nextAllocated = Number(body.allocated_hours || 0);
             if (!Number.isNaN(nextAllocated) && nextAllocated >= 0) {
                 if (job.base_allocated_hours === null || typeof job.base_allocated_hours === 'undefined') {
                     job.base_allocated_hours = prevAllocated;
                 }
+                allocatedHoursChanged = nextAllocated !== prevAllocated;
                 job.allocated_hours = nextAllocated;
 
                 const consumed = Number(job.consumed_hours || 0);
@@ -1276,6 +1286,10 @@ router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
                 job.status = computeDerivedStatus(job);
             }
         }
+
+        // Not hard-enforced server-side: requiring this here would break allocated_hours
+        // edits outright for any client that hasn't yet deployed the field. The frontend
+        // requires it before allowing Save; this just records whatever reason is given.
 
         if (Object.prototype.hasOwnProperty.call(body, 'subtasks')) {
             job.subtasks = normalizeSubtasksInput(body.subtasks);
@@ -1291,7 +1305,7 @@ router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
             actor_email: req.session.user?.email || '',
             actor_role: req.session.user?.role || 'supervisor',
             at: new Date(),
-            type: 'job_updated',
+            type: allocatedHoursChanged ? 'hours_updated' : 'job_updated',
             details: {
                 previous: prevSnapshot,
                 next: {
@@ -1303,7 +1317,13 @@ router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
                     start_date: job.start_date,
                     target_completion_date: job.target_completion_date,
                     subtasks: job.subtasks
-                }
+                },
+                ...(allocatedHoursChanged ? {
+                    previous_allocated_hours: prevAllocated,
+                    next_allocated_hours: job.allocated_hours,
+                    base_allocated_hours: job.base_allocated_hours,
+                    reason: hoursChangeReason
+                } : {})
             }
         });
 
@@ -1467,6 +1487,10 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId', requireSupervisor, async (r
             st.allocated_hours = Number.isFinite(alloc) ? Math.max(0, alloc) : 0;
         }
 
+        const prevAssigned = Array.isArray(st.assigned_technicians)
+            ? st.assigned_technicians.map((a) => ({ technician_id: String(a?.technician_id || ''), allocated_hours: Number(a?.allocated_hours || 0) }))
+            : [];
+
         if (Object.prototype.hasOwnProperty.call(req.body, 'assigned_technicians')) {
             const assigned = Array.isArray(req.body.assigned_technicians) ? req.body.assigned_technicians : [];
             st.assigned_technicians = assigned
@@ -1480,6 +1504,37 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId', requireSupervisor, async (r
 
         // Reconciling subtask allocations against the job's overall allocated_hours is
         // left to the supervisor to do deliberately, not enforced here.
+
+        // Record which technicians' hour allocations actually changed on this subtask,
+        // along with why (not hard-required server-side, same reasoning as job-level
+        // hours changes above — the frontend requires it before allowing Save).
+        const nextAssigned = (st.assigned_technicians || []).map((a) => ({ technician_id: String(a?.technician_id || ''), technician_name: a?.technician_name || '', allocated_hours: Number(a?.allocated_hours || 0) }));
+        const prevByTech = new Map(prevAssigned.map((a) => [a.technician_id, a.allocated_hours]));
+        const hourChanges = nextAssigned
+            .filter((a) => prevByTech.has(a.technician_id) && prevByTech.get(a.technician_id) !== a.allocated_hours)
+            .map((a) => ({
+                technician_id: a.technician_id,
+                technician_name: a.technician_name,
+                previous_allocated_hours: prevByTech.get(a.technician_id),
+                next_allocated_hours: a.allocated_hours
+            }));
+
+        if (hourChanges.length) {
+            const reason = typeof req.body.hours_change_reason === 'string' ? req.body.hours_change_reason.trim() : '';
+            job.audit_history = Array.isArray(job.audit_history) ? job.audit_history : [];
+            job.audit_history.push({
+                actor_email: req.session.user?.email || '',
+                actor_role: req.session.user?.role || 'supervisor',
+                at: new Date(),
+                type: 'subtask_hours_updated',
+                details: {
+                    subtask_id: String(st._id || ''),
+                    subtask_title: st.title,
+                    changes: hourChanges,
+                    reason
+                }
+            });
+        }
 
         await job.save();
         const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
