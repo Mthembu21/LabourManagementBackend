@@ -454,6 +454,21 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKeyOrKeys) {
                                 '$hours_logged'
                             ]
                         }
+                    },
+                    // Approved-only total, no fallback to hours_logged. Used to decide
+                    // whether a technician's stage is actually done (see completed below) —
+                    // pending/unapproved submissions must not be able to mark work complete
+                    // on their own, or a technician's stage (and the job itself) disappears
+                    // from their own booking list the moment their pending hours alone reach
+                    // the allocation, even though a supervisor hasn't confirmed any of it yet.
+                    approvedConsumed: {
+                        $sum: {
+                            $cond: [
+                                { $gt: ['$approved_hours', 0] },
+                                '$approved_hours',
+                                0
+                            ]
+                        }
                     }
                 }
             }
@@ -492,6 +507,7 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKeyOrKeys) {
     const consumedByJobSubtask = new Map();
     const consumedByJobSubtaskTech = new Map();
     const consumedByJobTech = new Map();
+    const approvedConsumedByJobSubtaskTech = new Map();
 
     for (const row of logAgg) {
         const jobId = String(row?._id?.job_id || '');
@@ -499,6 +515,8 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKeyOrKeys) {
         const techId = String(row?._id?.technician_id || '');
         const hrs = Number(row?.consumed || 0);
         if (!jobId || !subtaskId || !techId) continue;
+
+        approvedConsumedByJobSubtaskTech.set(`${jobId}:${subtaskId}:${techId}`, Number(row?.approvedConsumed || 0));
 
         const key = `${jobId}:${subtaskId}:${techId}`;
         consumedByJobSubtaskTech.set(key, hrs);
@@ -613,12 +631,22 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKeyOrKeys) {
                     ? Math.max(0, Math.min(100, (consumed / denomAllocated) * 100))
                     : 0;
 
+                // Approved-only percentage, used only to decide "completed" (see note on
+                // approvedConsumed above). progress_percentage below stays provisional
+                // (includes pending hours) so progress bars still reflect submitted work.
+                const approvedConsumed = techId && subtaskId
+                    ? (approvedConsumedByJobSubtaskTech.get(`${String(obj.job_number)}:${subtaskId}:${techId}`) || 0)
+                    : 0;
+                const approvedPct = denomAllocated > 0
+                    ? Math.max(0, Math.min(100, (approvedConsumed / denomAllocated) * 100))
+                    : 0;
+
                 const stored = storedByTechId.get(techId);
                 const storedCompleted = Boolean(stored?.completed);
                 const storedCompletedAt = stored?.completed_at ? new Date(stored.completed_at) : null;
                 const storedStartedAt = stored?.started_at ? new Date(stored.started_at) : null;
 
-                const completed = storedCompleted || pct >= 100 - 1e-9;
+                const completed = storedCompleted || approvedPct >= 100 - 1e-9;
                 const completedAt = storedCompletedAt;
 
                 return {
