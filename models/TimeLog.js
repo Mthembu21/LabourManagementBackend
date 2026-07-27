@@ -152,6 +152,14 @@ const timeLogSchema = new mongoose.Schema({
         default: 0,
         min: 0
     },
+    // Technician explicitly chose to submit this entry as overtime, bypassing the
+    // daily productive-hours cap. The actual normal/overtime hour split is still
+    // computed automatically (reallocateDayNormalOvertime) — this flag only records
+    // that the technician knowingly asked for the cap to be bypassed here.
+    requested_overtime: {
+        type: Boolean,
+        default: false
+    },
 
     approval_status: {
         type: String,

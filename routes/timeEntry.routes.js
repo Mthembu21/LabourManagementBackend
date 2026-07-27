@@ -1974,6 +1974,7 @@ router.post('/', requireAuth, async (req, res) => {
         const categoryDetail = typeof payload?.category_detail === 'string' ? payload.category_detail : '';
         const categoryNote = typeof payload?.category_note === 'string' ? payload.category_note : '';
         const isLeave = !!payload?.is_leave;
+        const isMarkedOvertime = !!payload?.is_overtime;
 
         // Validations
         if (!technicianId) return res.status(400).json({ error: 'technician_id is required' });
@@ -2028,17 +2029,23 @@ router.post('/', requireAuth, async (req, res) => {
                 });
             }
 
-            // Enforce productive-hours cap (7.5 Mon-Thu, 6 Friday)
-            const availableProductiveHours = await timeAllocationService.getAvailableProductiveHours(logDate);
-            const totalForDay = existingDayLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
-            if ((totalForDay + hoursLogged) > availableProductiveHours + 1e-9) {
-                return res.status(400).json({
-                    error: `Cannot log more than ${availableProductiveHours} productive hours on this day`,
-                    available_hours: availableProductiveHours,
-                    already_logged: totalForDay,
-                    requested: hoursLogged,
-                    remaining: Math.max(0, availableProductiveHours - totalForDay)
-                });
+            // Enforce productive-hours cap (7.5 Mon-Thu, 6 Friday) — unless the technician
+            // explicitly marked this entry as overtime, in which case they can still submit
+            // past the cap. The normal/overtime hour split (and pay multiplier) is still
+            // computed automatically by reallocateDayNormalOvertime; hours beyond the daily
+            // limit naturally fall into overtime_hours there regardless of this flag.
+            if (!isMarkedOvertime) {
+                const availableProductiveHours = await timeAllocationService.getAvailableProductiveHours(logDate);
+                const totalForDay = existingDayLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+                if ((totalForDay + hoursLogged) > availableProductiveHours + 1e-9) {
+                    return res.status(400).json({
+                        error: `Cannot log more than ${availableProductiveHours} productive hours on this day`,
+                        available_hours: availableProductiveHours,
+                        already_logged: totalForDay,
+                        requested: hoursLogged,
+                        remaining: Math.max(0, availableProductiveHours - totalForDay)
+                    });
+                }
             }
         }
 
@@ -2097,6 +2104,7 @@ router.post('/', requireAuth, async (req, res) => {
             existingSameJob.subtask_id = isIdle ? null : String(subtaskId);
             existingSameJob.subtask_title = isIdle ? null : resolvedSubtaskTitle;
             existingSameJob.is_leave = isLeave;
+            existingSameJob.requested_overtime = Boolean(existingSameJob.requested_overtime) || isMarkedOvertime;
 
             if (!needsApproval) {
                 existingSameJob.approval_status = 'approved';
@@ -2119,6 +2127,7 @@ router.post('/', requireAuth, async (req, res) => {
                 category_note: isIdle ? String(categoryNote || '') : '',
                 is_idle: isIdle,
                 is_leave: isLeave,
+                requested_overtime: isMarkedOvertime,
                 approval_status: defaultStatus,
                 approved_hours: defaultStatus === 'approved' ? hoursLogged : 0
             });
