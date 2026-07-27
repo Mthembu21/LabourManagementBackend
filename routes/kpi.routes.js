@@ -70,6 +70,15 @@ router.get('/:supervisorKey/technician/:technicianId/month/:month/:year', requir
     }
 });
 
+// A foreman's `access` list names workshops by their access-key, not their
+// supervisor_key — this is the reverse of the tenantToAccess mapping in
+// auth.routes.js switch-tenant (kept in sync with it).
+const ACCESS_KEY_TO_SUPERVISOR_KEYS = {
+    components: ['component', 'kathu'],
+    pdi: ['pdis'],
+    rebuild: ['rebuild']
+};
+
 // Get dashboard KPIs for supervisor (optionally filtered by technician_id)
 router.get('/:supervisorKey/dashboard/overview', requireAuth, async (req, res) => {
     try {
@@ -87,11 +96,23 @@ router.get('/:supervisorKey/dashboard/overview', requireAuth, async (req, res) =
             technician_id = sessionTechId;
         }
 
+        // A foreman covering multiple workshops gets a genuinely combined KPI view
+        // across all of them, rather than whichever single workshop their session
+        // happens to be switched to. Other roles (supervisor, manager) keep the
+        // existing single-workshop behavior — manager already has a dedicated
+        // multi-workshop comparison view (Workshop Overview) with different semantics.
+        let effectiveSupervisorKey = supervisorKey;
+        if (req.session.user?.type === 'supervisor' && req.session.user?.role === 'foreman') {
+            const access = Array.isArray(req.session.user?.access) ? req.session.user.access : [];
+            const keys = [...new Set(access.flatMap((a) => ACCESS_KEY_TO_SUPERVISOR_KEYS[a] || []))];
+            if (keys.length) effectiveSupervisorKey = keys;
+        }
+
         const startDate = start_date || new Date(new Date().setDate(new Date().getDate() - 30));
         const endDate = end_date || new Date();
 
         const dashboardKPIs = await KPICalculator.calculateDashboardKPIs(
-            supervisorKey,
+            effectiveSupervisorKey,
             startDate,
             endDate,
             technician_id

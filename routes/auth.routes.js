@@ -74,15 +74,17 @@ async function ensureSupervisorsSeeded() {
         },
         {
             supervisor_key: 'pdis',
-            email: 'leah.mcluskey@epiroc.com',
+            email: 'machineworkshoplanner@epiroc.com',
             password: '789',
             role: 'supervisor',
             access: ['pdi']
         },
         {
+            // Leah moved from the PDIS-only supervisor login above to foreman,
+            // covering both pdis and rebuild. Replaces banele.masondo@epiroc.com.
             supervisor_key: 'pdis',
-            email: 'banele.masondo@epiroc.com',
-            password: '963',
+            email: 'leah.mcluskey@epiroc.com',
+            password: '789',
             role: 'foreman',
             access: ['pdi', 'rebuild']
         },
@@ -146,6 +148,16 @@ async function ensureSupervisorsSeeded() {
             needsSave = true;
         }
         if (needsSave) await existing.save();
+    }
+
+    // Retired accounts: logins that have been replaced and should no longer work.
+    // Kept as an explicit list rather than deleting by hand, so the removal is
+    // idempotent and reproducible if the DB is ever reseeded.
+    const retiredEmails = ['banele.masondo@epiroc.com'];
+    if (retiredEmails.length) {
+        await Supervisor.deleteMany({
+            email: { $in: retiredEmails.map((e) => new RegExp(`^${escapeRegex(normalizeEmail(e))}$`, 'i')) }
+        });
     }
 
     supervisorsSeeded = true;

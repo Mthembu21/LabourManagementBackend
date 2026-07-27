@@ -2891,6 +2891,11 @@ class KPICalculator {
     const TimeLog = require('../models/TimeLog');
     const { eachDayOfInterval } = require('date-fns');
 
+    // supervisorKey may be a single key or an array of keys (e.g. a foreman
+    // covering multiple workshops) — everything below matches on $in for arrays.
+    const supervisorKeys = Array.isArray(supervisorKey) ? supervisorKey : [supervisorKey];
+    const supervisorKeyMatch = supervisorKeys.length === 1 ? supervisorKeys[0] : { $in: supervisorKeys };
+
     // Use local-time midnight to match TimeLog.normalizeLogDate (which uses setHours, not setUTCHours).
     // On UTC+ servers the UTC-based _midday would shift the window and miss records stored at local midnight.
     const startDate = new Date(from);
@@ -2910,7 +2915,7 @@ class KPICalculator {
 
     // 1. Fetch all TimeLog entries for this supervisor/range in one query
     const tlQuery = {
-      supervisor_key: supervisorKey,
+      supervisor_key: supervisorKeyMatch,
       log_date: { $gte: startDate, $lte: endDate }
     };
     if (technicianId) tlQuery.technician_id = technicianId;
@@ -2947,9 +2952,9 @@ class KPICalculator {
       // have no time logs yet still contribute their scheduled hours to the
       // denominator.  Without this, a day where only one technician logs leave
       // shows 0% availability because every other working technician is excluded.
-      const techQuery = supervisorKey === 'component'
-        ? { $or: [{ supervisor_key: 'component' }, { supervisor_key: { $exists: false } }], status: 'active' }
-        : { supervisor_key: supervisorKey, status: 'active' };
+      const techQuery = supervisorKeys.includes('component')
+        ? { $or: [{ supervisor_key: supervisorKeyMatch }, { supervisor_key: { $exists: false } }], status: 'active' }
+        : { supervisor_key: supervisorKeyMatch, status: 'active' };
       const activeTechs = await Technician.find(techQuery).select('_id').lean();
       for (const t of activeTechs) techSet.add(String(t._id));
     }
@@ -2965,7 +2970,7 @@ class KPICalculator {
 
     // 3. Batch-fetch approved AttendanceRecords (avoids N×M per-day DB queries)
     const absenceQuery = {
-      supervisor_key: supervisorKey,
+      supervisor_key: supervisorKeyMatch,
       date: { $gte: startDate, $lte: endDate },
       status: 'approved'
     };
@@ -3323,11 +3328,38 @@ class KPICalculator {
       },
     };
 
+    // Job status counts and overtime/technician totals for the KPI header cards —
+    // computed here (rather than left to the frontend's single-tenant `jobs` query)
+    // so a multi-workshop supervisorKey (e.g. a foreman covering several workshops)
+    // gets genuinely combined numbers instead of only whichever workshop happens to
+    // be the client's currently-selected tenant.
+    const totalOvertimeHours = timeLogs.reduce((sum, e) => sum + Number(e.overtime_hours || 0), 0);
+    const totalTechniciansCount = await Technician.countDocuments(
+      supervisorKeys.includes('component')
+        ? { $or: [{ supervisor_key: supervisorKeyMatch }, { supervisor_key: { $exists: false } }], status: 'active' }
+        : { supervisor_key: supervisorKeyMatch, status: 'active' }
+    );
+
+    const jobsForCounts = await Job.find({ supervisor_key: supervisorKeyMatch }).select('status bottleneck_count').lean();
+    const activeJobStatuses = ['pending_confirmation', 'active', 'in_progress', 'at_risk', 'over_allocated', 'overrun', 'reopened'];
+    const activeJobsCount = jobsForCounts.filter((j) => {
+      const status = j?.status;
+      if (!status || status === 'completed') return false;
+      return activeJobStatuses.includes(status) || Number(j?.bottleneck_count || 0) >= 2;
+    }).length;
+    const completedJobsCount = jobsForCounts.filter((j) => j?.status === 'completed').length;
+    const jobsAtRiskCount = jobsForCounts.filter((j) => j?.status === 'at_risk' || Number(j?.bottleneck_count || 0) >= 2).length;
+
     return {
       hasData,
       kpis,
       details,
       series,
+      overtime_hours: _round(totalOvertimeHours),
+      total_technicians: totalTechniciansCount,
+      active_jobs: activeJobsCount,
+      completed_jobs: completedJobsCount,
+      jobs_at_risk: jobsAtRiskCount,
       leave_days: totalLeaveDays,
       sick_days: totalSickDays,
       training_hours: _round(totalTraining),
