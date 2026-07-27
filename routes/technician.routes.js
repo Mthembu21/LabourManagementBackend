@@ -48,7 +48,18 @@ router.post('/', requireSupervisor, async (req, res) => {
 // ✅ GET all technicians (global search)
 router.get('/all', requireAuth, async (req, res) => {
     try {
-        const technicians = await Technician.find({ isActive: true });
+        // Sole purpose of this endpoint is name resolution for technicians outside the
+        // current workshop (cross-workshop assignments, historical time log entries) —
+        // so it must return every technician, not just currently-active ones.
+        //
+        // Previously filtered on isActive: true, but that field was added to the schema
+        // after most existing technician documents were created, so it's simply absent
+        // (not false) on the majority of them — Mongoose's schema default only applies
+        // to newly-created documents, it doesn't backfill existing ones. The filter was
+        // silently excluding most technicians, which is why technicians assigned from
+        // another workshop showed up as raw ObjectId strings instead of their names
+        // throughout the app (KPI tables, time logs, etc).
+        const technicians = await Technician.find({});
         console.log('Total technicians in database:', technicians.length);
         res.json(technicians);
     } catch (err) {
