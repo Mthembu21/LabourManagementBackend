@@ -673,6 +673,14 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKeyOrKeys) {
                 return {
                     technician_id: a.technician_id,
                     progress_percentage: pct,
+                    // This technician's own hours on this stage — not the stage-wide
+                    // total shared across every assigned technician. Two technicians on
+                    // the same stage with different personal allocations (e.g. 15h and
+                    // 13h) must each see their own remaining, not one shared pooled
+                    // figure that happens to match neither of them.
+                    consumed_hours: consumed,
+                    allocated_hours: denomAllocated,
+                    remaining_hours: Math.max(0, denomAllocated - consumed),
                     started_at: storedStartedAt,
                     completed,
                     completed_at: completedAt,
