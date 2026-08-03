@@ -194,6 +194,10 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId/complete', requireAuth, async
         // which fired prematurely while one task was still pending.
         if (job.status !== 'completed' && isJobFullyCompleteByAssignments(job)) {
             job.status = 'completed';
+            // Same override as a supervisor's manual "Mark Complete": every assigned
+            // technician finishing their subtasks should stick even if logged hours
+            // haven't caught up to allocated_hours by the time this saves.
+            job.manually_completed = true;
             job.progress_percentage = 100;
             job.remaining_hours = 0;
             job.actual_completion_date = new Date();
@@ -242,6 +246,7 @@ router.put('/by-job/:jobNumber/reopen', requireAuth, async (req, res) => {
 
         // Reopen the job
         job.status = 'active';
+        job.manually_completed = false;
         job.progress_percentage = Math.max(0, ((consumed / allocated) * 100) - 5); // Slightly reduce progress
         job.remaining_hours = allocated - consumed;
         job.actual_completion_date = null;
@@ -328,6 +333,14 @@ function computeAtRiskInfo(jobObj) {
 
 function computeDerivedStatus(jobObj) {
     if (!jobObj) return 'in_progress';
+
+    // A supervisor's explicit "Mark Complete" click always wins over the hour/progress
+    // derivation below — without this, the completion is silently reverted the next time
+    // the job is fetched, since this function recomputes status from hours on every read
+    // regardless of what was just saved. manually_completed is cleared on reopen or when
+    // allocated hours are edited, so it stays escapable instead of becoming the same
+    // sticky-completed trap the raw status field used to be (see note below).
+    if (jobObj.manually_completed) return 'completed';
 
     // Deliberately NOT trusting a stored status === 'completed' here: this function
     // recomputes status FROM the current numbers every time hours change, and the Job
@@ -1136,6 +1149,10 @@ router.post('/by-job/:jobNumber/recover-technical-complexity', requireSupervisor
         job.allocated_hours = nextAllocated;
         job.recovered_technical_complexity_hours = recoveredAlready + unrecovered;
 
+        // Recovering hours back onto a completed job is meant to reopen it for more work,
+        // not leave it stuck reading 'completed' via the manual-override flag.
+        job.manually_completed = false;
+
         // Recalculate derived job metrics
         const nextRemaining = Math.max(0, nextAllocated - consumed);
         const nextOverrun = Math.max(0, consumed - nextAllocated);
@@ -1257,7 +1274,13 @@ router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
         }
 
         if (typeof body.description === 'string') job.description = body.description;
-        if (typeof body.status === 'string') job.status = body.status;
+        if (typeof body.status === 'string') {
+            job.status = body.status;
+            // Same explicit-override rule as the job-management /status endpoint: choosing
+            // 'completed' here must survive the next read-time status recompute, and
+            // choosing anything else must release a prior manual completion.
+            job.manually_completed = body.status === 'completed';
+        }
         if (Object.prototype.hasOwnProperty.call(body, 'start_date')) job.start_date = body.start_date ? new Date(body.start_date) : null;
         if (Object.prototype.hasOwnProperty.call(body, 'target_completion_date')) job.target_completion_date = body.target_completion_date ? new Date(body.target_completion_date) : null;
 
@@ -1306,6 +1329,11 @@ router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
                 }
                 allocatedHoursChanged = nextAllocated !== prevAllocated;
                 job.allocated_hours = nextAllocated;
+
+                // Raising/lowering hours after a manual completion means the supervisor is
+                // reworking the job's scope, not confirming it's still done — release the
+                // override so status goes back to being hour-derived.
+                if (allocatedHoursChanged) job.manually_completed = false;
 
                 const consumed = Number(job.consumed_hours || 0);
                 job.remaining_hours = Math.max(0, nextAllocated - consumed);

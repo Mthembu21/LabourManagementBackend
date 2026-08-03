@@ -201,6 +201,13 @@ router.post('/:supervisorKey/job/:jobId/status', requireAuth, async (req, res) =
         const oldStatus = job.status;
         job.status = status;
 
+        // Explicit override so this sticks through the next read-time status recompute
+        // (enrichJobsWithTimeLogProgress in job.routes.js recalculates status from hours
+        // on every fetch, which would otherwise silently revert this the moment the
+        // technician's dashboard or the job detail view refetches). Cleared whenever the
+        // supervisor sets a different status, or via reopen/hours-edit elsewhere.
+        job.manually_completed = status === 'completed';
+
         // Add to audit history
         if (!job.audit_history) {
             job.audit_history = [];
@@ -215,6 +222,8 @@ router.post('/:supervisorKey/job/:jobId/status', requireAuth, async (req, res) =
 
         if (status === 'completed') {
             job.actual_completion_date = new Date();
+            job.progress_percentage = 100;
+            job.remaining_hours = 0;
         }
 
         await job.save();
@@ -336,6 +345,7 @@ router.post('/:supervisorKey/bulk-status-update', requireAuth, async (req, res) 
 
                 const oldStatus = job.status;
                 job.status = status;
+                job.manually_completed = status === 'completed';
 
                 if (!job.audit_history) {
                     job.audit_history = [];
@@ -350,6 +360,8 @@ router.post('/:supervisorKey/bulk-status-update', requireAuth, async (req, res) 
 
                 if (status === 'completed') {
                     job.actual_completion_date = new Date();
+                    job.progress_percentage = 100;
+                    job.remaining_hours = 0;
                 }
 
                 await job.save();

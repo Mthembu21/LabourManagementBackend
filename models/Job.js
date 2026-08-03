@@ -142,6 +142,15 @@ const jobSchema = new mongoose.Schema({
         enum: ['pending_confirmation', 'active', 'in_progress', 'completed', 'at_risk', 'over_allocated', 'overrun'],
         default: 'pending_confirmation'
     },
+    // Explicit supervisor "Mark Complete" override. Read-time status derivation
+    // (computeDerivedStatus in job.routes.js) recomputes status from hours/progress on
+    // every fetch, which would otherwise silently revert a manual completion. This flag
+    // is cleared on reopen or when allocated hours are edited, so it doesn't become a
+    // permanent trap the way trusting the raw status field once did.
+    manually_completed: {
+        type: Boolean,
+        default: false
+    },
     subtasks: {
         type: [subtaskSchema],
         default: []
