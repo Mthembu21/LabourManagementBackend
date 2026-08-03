@@ -2913,12 +2913,43 @@ class KPICalculator {
       endDate: endDate.toISOString(),
     });
 
-    // 1. Fetch all TimeLog entries for this supervisor/range in one query
+    // 1. Determine which technicians' hours should count toward this workshop's KPIs.
+    // Attribution follows the technician's HOME supervisor_key, not whichever workshop
+    // happens to own the job they logged hours against — otherwise a technician
+    // temporarily borrowed by another workshop (global/temporary assignment) would have
+    // their hours counted toward the borrowing workshop's KPIs instead of their own
+    // team's, and the borrowing workshop's numbers would be inflated by staff that
+    // aren't really theirs.
+    let techIds;
+    if (technicianId) {
+      // Single-tech view (technician portal): scope to only that technician.
+      techIds = [String(technicianId)];
+    } else {
+      const techQuery = supervisorKeys.includes('component')
+        ? { $or: [{ supervisor_key: supervisorKeyMatch }, { supervisor_key: { $exists: false } }], status: 'active' }
+        : { supervisor_key: supervisorKeyMatch, status: 'active' };
+      const activeTechs = await Technician.find(techQuery).select('_id').lean();
+      techIds = activeTechs.map(t => String(t._id));
+    }
+
+    if (techIds.length === 0) {
+      const kpis = buildKpis(
+        { availableHours: 0, availableProductiveHours: 0, productive: 0, nonProductive: 0, idle: 0, training: 0 },
+        'dashboard_empty'
+      );
+      console.info('[KPI] No technician data found for range', { supervisorKey, from, to });
+      return { hasData: false, kpis };
+    }
+
+    const techSet = new Set(techIds);
+
+    // 2. Fetch all TimeLog entries for these technicians in the range — matched by
+    // technician_id, not TimeLog.supervisor_key (which records the JOB's workshop, for
+    // job-progress tracking elsewhere, and would misattribute borrowed hours here).
     const tlQuery = {
-      supervisor_key: supervisorKeyMatch,
+      technician_id: { $in: techIds },
       log_date: { $gte: startDate, $lte: endDate }
     };
-    if (technicianId) tlQuery.technician_id = technicianId;
 
     const timeLogs = await TimeLog.find(tlQuery).lean();
 
@@ -2938,34 +2969,6 @@ class KPICalculator {
 
     if (timeLogs.length === 0) {
       console.warn('[KPI WARNING] No TimeLog records found for range', { supervisorKey, startDate: startDate.toISOString(), endDate: endDate.toISOString() });
-    }
-
-    // 2. Determine which technicians to aggregate across.
-    // Always start from time-log owners so the set is never smaller than the data.
-    const techSet = new Set(timeLogs.map(e => String(e.technician_id)));
-
-    if (technicianId) {
-      // Single-tech view (technician portal): scope to only that technician.
-      techSet.add(String(technicianId));
-    } else {
-      // Workshop view: include ALL active technicians so that technicians who
-      // have no time logs yet still contribute their scheduled hours to the
-      // denominator.  Without this, a day where only one technician logs leave
-      // shows 0% availability because every other working technician is excluded.
-      const techQuery = supervisorKeys.includes('component')
-        ? { $or: [{ supervisor_key: supervisorKeyMatch }, { supervisor_key: { $exists: false } }], status: 'active' }
-        : { supervisor_key: supervisorKeyMatch, status: 'active' };
-      const activeTechs = await Technician.find(techQuery).select('_id').lean();
-      for (const t of activeTechs) techSet.add(String(t._id));
-    }
-
-    if (techSet.size === 0) {
-      const kpis = buildKpis(
-        { availableHours: 0, availableProductiveHours: 0, productive: 0, nonProductive: 0, idle: 0, training: 0 },
-        'dashboard_empty'
-      );
-      console.info('[KPI] No technician data found for range', { supervisorKey, from, to });
-      return { hasData: false, kpis };
     }
 
     // 3. Batch-fetch approved AttendanceRecords (avoids N×M per-day DB queries)
