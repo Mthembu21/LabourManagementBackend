@@ -3,6 +3,7 @@ const router = express.Router();
 const DowntimeLog = require('../models/DowntimeLog');
 const DayEntry = require('../models/DayEntry');
 const Job = require('../models/Job');
+const Technician = require('../models/Technician');
 const { requireAuth } = require('../middleware/auth');
 
 /**
@@ -38,9 +39,13 @@ router.post('/:supervisorKey/:jobId/pause', requireAuth, async (req, res) => {
         });
 
         if (!downtimeLog) {
+            const technician = await Technician.findById(technician_id).select('name').lean();
+            const technician_name = technician?.name || req.session?.user?.name || 'Unknown';
+
             downtimeLog = new DowntimeLog({
                 supervisor_key: supervisorKey,
                 technician_id,
+                technician_name,
                 job_id: jobId,
                 date: today,
                 is_active: true

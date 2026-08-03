@@ -7,18 +7,12 @@ const pauseResumeEventSchema = new mongoose.Schema({
         required: true
     },
     resumed_at: Date,
+    // Free-form: the technician-facing pause form offers its own set of reason
+    // codes (waiting_parts, equipment_issue, customer_delay, weather, maintenance,
+    // safety, other) which don't match a fixed enum here — an enum previously listed
+    // a different, older set of reasons and rejected every real submission outright.
     reason: {
         type: String,
-        enum: [
-            'Waiting for Parts',
-            'Equipment Malfunction',
-            'Lack of Tools',
-            'Unclear Instructions',
-            'Waiting for Approval',
-            'Weather Conditions',
-            'Resource Unavailable',
-            'Other'
-        ],
         required: true
     },
     description: String,
