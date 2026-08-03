@@ -616,7 +616,15 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKeyOrKeys) {
         const subtasks = (obj.subtasks || []).map((st) => {
             const subtaskId = String(st?._id || st?.id || '');
             const subtaskAllocated = Number(st?.allocated_hours || 0);
-            const allocatedHours = subtaskAllocated > 0 ? subtaskAllocated : jobAllocated;
+            // Do NOT fall back to the job's overall allocated_hours here: every new
+            // job's default stages (getDefaultSubtasks) start at 0 allocated_hours,
+            // and a supervisor typically only allocates hours to some of them. Falling
+            // back to jobAllocated made every untouched 0h stage independently claim
+            // the job's full allocation as its own "remaining" — e.g. three unallocated
+            // stages on a 10h job each showing 10h remaining, 30h of phantom capacity
+            // on a job only budgeted for 10h total. A stage with nothing allocated to
+            // it yet has nothing remaining until a supervisor actually allocates to it.
+            const allocatedHours = subtaskAllocated;
 
             const subtaskConsumed = subtaskId
                 ? (consumedByJobSubtask.get(`${String(obj.job_number)}:${subtaskId}`) || 0)
