@@ -691,6 +691,15 @@ async function enrichJobsWithTimeLogProgress(jobDocs, supervisorKeyOrKeys) {
         return {
             ...obj,
             subtasks,
+            // Override the stored consumed_hours/remaining_hours with the freshly
+            // computed, pending-inclusive total (same measure used for stage-level
+            // "Logged" figures and aggregated_progress_percentage below). The stored
+            // field only increments on approval (requiresApprovalForTenant is now
+            // always true), so it could sit at 0 indefinitely while stage-level
+            // figures already reflected the real logged hours — showing "Consumed:
+            // 0.0h" at the job level next to a stage clearly showing hours logged.
+            consumed_hours: totalConsumedAcrossSubtasks,
+            remaining_hours: Math.max(0, jobAllocated - totalConsumedAcrossSubtasks),
             status: computeDerivedStatus({
                 ...obj,
                 aggregated_progress_percentage: overall,
