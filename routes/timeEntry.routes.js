@@ -2077,13 +2077,42 @@ router.post('/', requireAuth, async (req, res) => {
             if (!jobForCheck) return res.status(400).json({ error: 'Job not found' });
 
             const effectiveSupervisorKey = jobForCheck.supervisor_key || req.tenant.supervisor_key;
-            const consumedForJob = needsApproval
-                ? await sumSubmittedJobHours({ supervisorKey: effectiveSupervisorKey, jobId })
-                : Number(jobForCheck.consumed_hours || 0);
 
-            const remaining = Math.max(0, Number(jobForCheck.allocated_hours || 0) - consumedForJob);
-            if (deltaHours > remaining) {
-                return res.status(400).json({ error: 'Not enough remaining hours on this job' });
+            // Prefer the technician's own stage-level allocation when one exists.
+            // job.allocated_hours can be (deliberately, per how job editing now works)
+            // stale relative to real stage-level budgeting, so capping every
+            // technician's booking against the job-level total blocked someone with a
+            // large stage allocation (e.g. 80h) the moment the job-level number was
+            // used up by other technicians' hours, even though their own stage still
+            // had plenty of room. Only fall back to the job-level cap when this
+            // technician has no specific allocation on this stage.
+            const stageAllocation = subtaskId
+                ? getSubtaskAllocationForTechnician(jobForCheck, subtaskId, technicianId)
+                : null;
+
+            if (stageAllocation && stageAllocation.allocated_hours > 0) {
+                const stageLogs = await TimeLog.find({
+                    technician_id: technicianId,
+                    job_id: String(jobId),
+                    subtask_id: String(subtaskId),
+                    is_idle: false
+                });
+                const consumedOnStage = stageLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+                const stageRemaining = Math.max(0, stageAllocation.allocated_hours - consumedOnStage);
+                if (deltaHours > stageRemaining) {
+                    return res.status(400).json({
+                        error: `Not enough remaining hours on this stage (${stageAllocation.subtask_title || 'stage'}): ${stageRemaining.toFixed(1)}h remaining`
+                    });
+                }
+            } else {
+                const consumedForJob = needsApproval
+                    ? await sumSubmittedJobHours({ supervisorKey: effectiveSupervisorKey, jobId })
+                    : Number(jobForCheck.consumed_hours || 0);
+
+                const remaining = Math.max(0, Number(jobForCheck.allocated_hours || 0) - consumedForJob);
+                if (deltaHours > remaining) {
+                    return res.status(400).json({ error: 'Not enough remaining hours on this job' });
+                }
             }
         }
 
