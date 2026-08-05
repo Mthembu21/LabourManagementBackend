@@ -2229,10 +2229,19 @@ router.get('/technician/:technicianId', requireAuth, async (req, res) => {
     try {
         const deny = requireSelfOrSupervisor(req, res, req.params.technicianId);
         if (deny) return;
-        const entries = await TimeLog.find({
-            ...tenantQuery(req.tenant.supervisor_key),
-            technician_id: req.params.technicianId
-        }).sort({ log_date: -1, createdAt: -1 }).limit(100);
+
+        // A technician viewing their own history must see every entry they've ever
+        // logged, including hours booked against another workshop's job (stored under
+        // that job's supervisor_key, not their own — see effectiveKey in the entry
+        // creation routes). Scoping this by the technician's own tenant silently hid
+        // those cross-workshop entries. A supervisor looking up a technician's entries
+        // stays scoped to their own tenant, same as the generic list route above.
+        const query = { technician_id: req.params.technicianId };
+        if (req.session.user?.type !== 'technician') {
+            Object.assign(query, tenantQuery(req.tenant.supervisor_key));
+        }
+
+        const entries = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(500);
         res.json(entries);
     } catch (error) {
         res.status(500).json({ error: error.message });
