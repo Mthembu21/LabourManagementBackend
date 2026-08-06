@@ -2049,9 +2049,13 @@ router.post('/', requireAuth, async (req, res) => {
             }
         }
 
+        // An overtime-flagged booking never merges into a normal booking on the same
+        // job/day (or vice versa) — they're kept as separate, clearly distinct entries
+        // instead of being summed into one combined figure.
         const existingSameJob = existingDayLogs.find((e) =>
-            String(e.job_id) === String(jobId) && 
-            String(e.subtask_id || '') === String(subtaskId || '')
+            String(e.job_id) === String(jobId) &&
+            String(e.subtask_id || '') === String(subtaskId || '') &&
+            Boolean(e.requested_overtime) === isMarkedOvertime
         );
 
         const deltaHours = hoursLogged;
@@ -2317,13 +2321,23 @@ const reallocateDayNormalOvertime = async (technicianId, logDate) => {
             // ✅ Handle leave entries - no overtime calculation for leave
             const isLeave = Boolean(l.is_leave);
             let normal, ot, payable, overtimeMultiplier;
-            
+
             if (isLeave) {
                 // Leave entries should not have overtime
                 normal = hrs;
                 ot = 0;
                 payable = hrs;
                 overtimeMultiplier = 1;
+            } else if (Boolean(l.requested_overtime)) {
+                // Technician explicitly marked this entry as overtime to submit past
+                // the day's normal-hours cap — the whole entry counts as overtime
+                // rather than being split by the day's normal-fill order, and it
+                // doesn't draw from normalRemaining so it can't eat into what's
+                // available to this day's other (non-overtime-flagged) entries.
+                normal = 0;
+                ot = hrs;
+                payable = multiplier > 1 ? (hrs * multiplier) : hrs;
+                overtimeMultiplier = Math.max(1, multiplier);
             } else {
                 // Normal overtime calculation for non-leave entries
                 normal = isAllOvertime ? 0 : Math.max(0, Math.min(hrs, normalRemaining));

@@ -211,10 +211,13 @@ const timeLogSchema = new mongoose.Schema({
     timestamps: true
 });
 
-// Prevent duplicate log entries for same technician + job + date
-// (editing should use update endpoint)
+// Prevent duplicate log entries for same technician + job + date + overtime flag
+// (editing should use update endpoint). requested_overtime is part of the key so
+// an overtime-flagged booking gets its own entry instead of merging into a normal
+// booking on the same job/day — they're tracked as separate, clearly distinct
+// records rather than being summed into one combined figure.
 timeLogSchema.index(
-    { technician_id: 1, job_id: 1, subtask_id: 1, log_date: 1 },
+    { technician_id: 1, job_id: 1, subtask_id: 1, log_date: 1, requested_overtime: 1 },
     { unique: true }
 );
 
