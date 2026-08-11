@@ -1444,6 +1444,19 @@ const requireForemanOrManager = (req, res) => {
     return null;
 };
 
+// A foreman/manager's approval scope spans multiple workshops at once (matches
+// the $in query GET /approvals/pending already uses) — a single approve/decline
+// action must use the SAME scope, not just the workshop their session happens to
+// be currently switched to, or an entry from the other workshop they cover 404s
+// as "not found" even though the pending list just showed it to them.
+const getApprovalScopedSupervisorMatch = (req) => {
+    const role = req.session.user.role || 'supervisor';
+    if (role === 'foreman' || role === 'manager') {
+        return { supervisor_key: { $in: ['pdis', 'rebuild'] } };
+    }
+    return tenantQuery(req.tenant.supervisor_key);
+};
+
 const requiresApprovalForTenant = (supervisorKey) => {
     // Require approval for all tenants to enable proper workflow
     return true; // All tenants require approval
@@ -1549,7 +1562,7 @@ router.put('/:id/approve', requireSupervisor, async (req, res) => {
         const resolvedNote = approval_note || note || '';
 
         const existing = await TimeLog.findOne({
-            ...tenantQuery(req.tenant.supervisor_key),
+            ...getApprovalScopedSupervisorMatch(req),
             _id: req.params.id
         });
 
@@ -1588,16 +1601,19 @@ router.put('/:id/approve', requireSupervisor, async (req, res) => {
 
         await existing.save();
 
-        // Recompute job + stage progress — isolated so a job update failure doesn't block the approval response
+        // Recompute job + stage progress — isolated so a job update failure doesn't block the approval response.
+        // Scoped by the entry's OWN workshop (existing.supervisor_key), not the approving
+        // user's current session tenant — for a foreman those can differ (they approve
+        // across multiple workshops from whichever single one their session is switched to).
         if (!existing.is_idle) {
             try {
                 const job = await Job.findOne({
-                    ...tenantQuery(req.tenant.supervisor_key),
+                    ...tenantQuery(existing.supervisor_key),
                     job_number: existing.job_id
                 });
                 if (job) {
                     const approvedLogs = await TimeLog.find({
-                        ...tenantQuery(req.tenant.supervisor_key),
+                        ...tenantQuery(existing.supervisor_key),
                         is_idle: false,
                         job_id: existing.job_id,
                         technician_id: existing.technician_id,
@@ -1610,7 +1626,7 @@ router.put('/:id/approve', requireSupervisor, async (req, res) => {
                     );
 
                     const approvedLogsAllTech = await TimeLog.find({
-                        ...tenantQuery(req.tenant.supervisor_key),
+                        ...tenantQuery(existing.supervisor_key),
                         is_idle: false,
                         job_id: existing.job_id,
                         approval_status: { $in: ['approved'] }
@@ -1643,7 +1659,7 @@ router.put('/:id/approve', requireSupervisor, async (req, res) => {
                         const allocHours = Number(allocation?.allocated_hours || 0);
                         if (allocHours > 0) {
                             const stageApprovedLogs = await TimeLog.find({
-                                ...tenantQuery(req.tenant.supervisor_key),
+                                ...tenantQuery(existing.supervisor_key),
                                 is_idle: false,
                                 job_id: existing.job_id,
                                 subtask_id: String(subtaskId),
@@ -1695,7 +1711,7 @@ router.put('/:id/decline', requireSupervisor, async (req, res) => {
         const resolvedNote = approval_note || note || '';
 
         const existing = await TimeLog.findOne({
-            ...tenantQuery(req.tenant.supervisor_key),
+            ...getApprovalScopedSupervisorMatch(req),
             _id: req.params.id
         });
 
