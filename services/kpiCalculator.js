@@ -3107,7 +3107,17 @@ class KPICalculator {
         let dayProductive = 0, dayTraining = 0, dayNonProductive = 0, dayIdle = 0;
 
         for (const entry of dayEntries) {
-          const hrs = Number(entry.hours_logged || 0);
+          // KPIs are built on what the supervisor actually confirmed, not on the raw
+          // technician submission: a declined entry contributes nothing, and a
+          // partially-approved entry contributes only the approved portion — not all
+          // logged hours are productive just because they were logged. An entry still
+          // awaiting a decision has no confirmed figure yet, so it's shown provisionally
+          // at its logged value until approved or declined.
+          const hrs = entry.approval_status === 'approved'
+            ? Number(entry.approved_hours || 0)
+            : entry.approval_status === 'declined'
+              ? 0
+              : Number(entry.hours_logged || 0);
           // Always classify from live entry fields — never trust entry.time_category,
           // which defaults to 'productive' on all records written before the fix.
           const cat = classifyForDashboard(entry);
@@ -3357,7 +3367,11 @@ class KPICalculator {
     // so a multi-workshop supervisorKey (e.g. a foreman covering several workshops)
     // gets genuinely combined numbers instead of only whichever workshop happens to
     // be the client's currently-selected tenant.
-    const totalOvertimeHours = timeLogs.reduce((sum, e) => sum + Number(e.overtime_hours || 0), 0);
+    // A declined entry's hours were never accepted, so its overtime portion doesn't
+    // count toward the Overtime Hours card either.
+    const totalOvertimeHours = timeLogs
+      .filter(e => e.approval_status !== 'declined')
+      .reduce((sum, e) => sum + Number(e.overtime_hours || 0), 0);
     const totalTechniciansCount = await Technician.countDocuments(
       supervisorKeys.includes('component')
         ? { $or: [{ supervisor_key: supervisorKeyMatch }, { supervisor_key: { $exists: false } }], status: 'active' }
