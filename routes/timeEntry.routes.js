@@ -316,6 +316,18 @@ const upsertSubtaskProgressForTechnician = (jobDoc, subtaskId, technicianId, pro
     }
 };
 
+// How much of an entry's logged hours actually count as capacity used for the day.
+// A declined entry used none of the technician's daily capacity — it was rejected
+// outright — and a partially-approved entry only used the approved portion, not
+// everything that was originally logged. Used by the daily productive-hours cap
+// check so a decline/partial-approval frees up room to rebook, instead of the cap
+// permanently assuming the full original submission still stands.
+const effectiveEntryHours = (entry) => {
+    if (entry.approval_status === 'declined') return 0;
+    if (entry.approval_status === 'approved') return Number(entry.approved_hours || 0);
+    return Number(entry.hours_logged || 0);
+};
+
 const getSubtaskAllocationForTechnician = (jobDoc, subtaskId, technicianId) => {
     const job = jobDoc?.toObject ? jobDoc.toObject() : jobDoc;
     const subtasks = job?.subtasks || [];
@@ -2057,7 +2069,7 @@ router.post('/', requireAuth, async (req, res) => {
             // limit naturally fall into overtime_hours there regardless of this flag.
             if (!isMarkedOvertime) {
                 const availableProductiveHours = await timeAllocationService.getAvailableProductiveHours(logDate);
-                const totalForDay = existingDayLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
+                const totalForDay = existingDayLogs.reduce((sum, e) => sum + effectiveEntryHours(e), 0);
                 if ((totalForDay + hoursLogged) > availableProductiveHours + 1e-9) {
                     return res.status(400).json({
                         error: `Cannot log more than ${availableProductiveHours} productive hours on this day`,
