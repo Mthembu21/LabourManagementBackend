@@ -215,9 +215,13 @@ const timeLogSchema = new mongoose.Schema({
 // (editing should use update endpoint). requested_overtime is part of the key so
 // an overtime-flagged booking gets its own entry instead of merging into a normal
 // booking on the same job/day — they're tracked as separate, clearly distinct
-// records rather than being summed into one combined figure.
+// records rather than being summed into one combined figure. category is also part
+// of the key because idle-type bookings (Idle, Training, Admin, Waiting for Parts,
+// Leave, Sick) all share job_id=IDLE_JOB_ID with no subtask — without category in
+// the key, e.g. a Sick entry would collide with an earlier Leave/Idle entry logged
+// the same day and get rejected or merged into it instead of staying distinct.
 timeLogSchema.index(
-    { technician_id: 1, job_id: 1, subtask_id: 1, log_date: 1, requested_overtime: 1 },
+    { technician_id: 1, job_id: 1, subtask_id: 1, log_date: 1, requested_overtime: 1, category: 1 },
     { unique: true }
 );
 

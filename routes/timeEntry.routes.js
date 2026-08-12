@@ -1882,9 +1882,14 @@ router.post('/', requireAuth, async (req, res) => {
                 const totalForDay = existingDayLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
                 if ((totalForDay + hoursLogged) > 24 + 1e-9) continue;
 
-                const existingSameJob = existingDayLogs.find((e) => 
-                    String(e.job_id) === String(jobId) && 
-                    String(e.subtask_id || '') === String(subtaskId || '')
+                // Idle-type bookings (Idle, Training, Admin, Waiting for Parts, Leave, Sick)
+                // all share job_id=IDLE_JOB_ID with no subtask, so category must also match
+                // or e.g. a Sick entry would silently merge into an earlier Leave/Idle entry
+                // the same day, summing their hours into one inflated, mislabeled record.
+                const existingSameJob = existingDayLogs.find((e) =>
+                    String(e.job_id) === String(jobId) &&
+                    String(e.subtask_id || '') === String(subtaskId || '') &&
+                    (!isIdle || String(e.category || '') === String(category || ''))
                 );
 
                 const deltaHours = hoursLogged;
@@ -2068,10 +2073,17 @@ router.post('/', requireAuth, async (req, res) => {
         // An overtime-flagged booking never merges into a normal booking on the same
         // job/day (or vice versa) — they're kept as separate, clearly distinct entries
         // instead of being summed into one combined figure.
+        //
+        // Idle-type bookings (Idle, Training, Admin, Waiting for Parts, Leave, Sick) all
+        // share the same job_id (IDLE_JOB_ID) and no subtask, so category must also match
+        // or a Sick entry logged after an earlier Idle/Leave entry the same day would
+        // silently merge into it — summing their hours into one inflated, mislabeled
+        // record instead of staying two distinct entries.
         const existingSameJob = existingDayLogs.find((e) =>
             String(e.job_id) === String(jobId) &&
             String(e.subtask_id || '') === String(subtaskId || '') &&
-            Boolean(e.requested_overtime) === isMarkedOvertime
+            Boolean(e.requested_overtime) === isMarkedOvertime &&
+            (!isIdle || String(e.category || '') === String(category || ''))
         );
 
         const deltaHours = hoursLogged;
