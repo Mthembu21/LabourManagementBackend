@@ -2371,6 +2371,7 @@ const DowntimeLog = require('../models/DowntimeLog');
 const Job = require('../models/Job');
 const AttendanceRecord = require('../models/AttendanceRecord');
 const Technician = require('../models/Technician');
+const { getSouthAfricanHolidayInfo } = require('../lib/zaHolidays');
 
 const SYSTEM_ALLOCATED = {
   meetingMinutes: 15,
@@ -2999,6 +3000,12 @@ class KPICalculator {
 
     const days = eachDayOfInterval({ start: startDate, end: endDate });
 
+    // A public holiday is a day technicians aren't expected to work. Unlike a
+    // weekend it can still be worked (shutdown/overtime), so it isn't skipped
+    // outright here — the per-technician loop below excludes it from the
+    // scheduled/available denominator only on days nothing was actually logged.
+    const isPublicHoliday = (d) => getSouthAfricanHolidayInfo(d).is_public_holiday;
+
     // Per-day accumulator for the Performance tab chart series
     const dailyMap = new Map();
     for (const d of days) {
@@ -3061,14 +3068,25 @@ class KPICalculator {
         // timezones and produces a different key than the one in tlMap.
         if (this._isWeekend(d)) continue;
 
-        const { available_hours, available_productive_hours } = getAvailability(d);
         const dateStr = _toYMD(d);
         const key = `${tech}_${dateStr}`;
+        const dayEntries = tlMap.get(key) || [];
+        const holiday = isPublicHoliday(d);
 
-        totalScheduled += available_hours;
-        techDetail.scheduled_hours += available_hours;
+        // A public holiday nobody logged hours against is a day the technician wasn't
+        // expected to work — exclude it from the scheduled/available denominator so it
+        // doesn't drag down utilization/productivity like an ordinary no-show would. If
+        // they DID work it (shutdown/overtime), fall through and credit it normally.
+        if (holiday && dayEntries.length === 0) continue;
+
+        const { available_hours, available_productive_hours } = getAvailability(d);
         const dayData = dailyMap.get(dateStr);
-        if (dayData) dayData.scheduledHours += available_hours;
+
+        if (!holiday) {
+          totalScheduled += available_hours;
+          techDetail.scheduled_hours += available_hours;
+          if (dayData) dayData.scheduledHours += available_hours;
+        }
 
         // Approved full-day absence: contributes to scheduled but not to available hours
         if (absenceSet.has(key)) {
@@ -3085,7 +3103,6 @@ class KPICalculator {
         }
 
         // Sum TimeLog entries for this tech-day by time_category
-        const dayEntries = tlMap.get(key) || [];
         let notAvailableHrs = 0;
         let dayProductive = 0, dayTraining = 0, dayNonProductive = 0, dayIdle = 0;
 
@@ -3154,14 +3171,18 @@ class KPICalculator {
           }
         }
 
-        // Effective available = scheduled minus leave/sick logged directly in TimeLog
-        const effectiveAvailable = Math.max(0, available_hours - notAvailableHrs);
+        // Effective available = scheduled minus leave/sick logged directly in TimeLog.
+        // On a worked public holiday there was no scheduled capacity to begin with, so
+        // it contributes 0 here too — the hours still count above in the numerator
+        // (productive/training/etc.), just not against a denominator that assumes a
+        // mandated work day.
+        const effectiveAvailable = holiday ? 0 : Math.max(0, available_hours - notAvailableHrs);
         totalEffectiveAvailable += effectiveAvailable;
         techDetail.available_hours += effectiveAvailable;
 
         // Productive capacity is binary: any leave/sick entry on this day → 0.
         // Idle, Admin, WFP, and missing entries do NOT reduce productive capacity.
-        const techDayAvailProductive = notAvailableHrs > 0 ? 0 : available_productive_hours;
+        const techDayAvailProductive = holiday ? 0 : (notAvailableHrs > 0 ? 0 : available_productive_hours);
         totalAvailableProductive += techDayAvailProductive;
         techDetail.available_productive_hours += techDayAvailProductive;
 
