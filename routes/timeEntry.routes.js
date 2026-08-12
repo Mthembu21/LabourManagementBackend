@@ -1613,6 +1613,11 @@ router.put('/:id/approve', requireSupervisor, async (req, res) => {
 
         await existing.save();
 
+        // Refresh normal/overtime/payable for the day now that this entry's approved
+        // hours are known — they were computed from the raw submission at booking time
+        // and need to reflect the approval decision (including partial approval).
+        await reallocateDayNormalOvertime(existing.technician_id, existing.log_date).catch(console.error);
+
         // Recompute job + stage progress — isolated so a job update failure doesn't block the approval response.
         // Scoped by the entry's OWN workshop (existing.supervisor_key), not the approving
         // user's current session tenant — for a foreman those can differ (they approve
@@ -1741,6 +1746,10 @@ router.put('/:id/decline', requireSupervisor, async (req, res) => {
         existing.approval_note = resolvedNote;
 
         await existing.save();
+
+        // Refresh normal/overtime/payable for the day — a declined entry no longer
+        // contributes any hours to that split now that it's been rejected.
+        await reallocateDayNormalOvertime(existing.technician_id, existing.log_date).catch(console.error);
 
         res.json({
             message: 'Time log declined successfully',
@@ -2352,7 +2361,12 @@ const reallocateDayNormalOvertime = async (technicianId, logDate) => {
 
     for (const l of logs) {
         try {
-            const hrs = Number(l.hours_logged || 0);
+            // Normal/overtime/payable are derived from what was actually confirmed, not
+            // the raw submission — a declined entry contributes nothing here and a
+            // partially-approved entry only contributes its approved portion, so those
+            // figures (and the pay they imply) track the approval decision instead of
+            // staying frozen at whatever was originally logged.
+            const hrs = effectiveEntryHours(l);
             if (hrs < 0) {
                 console.warn('Invalid hours_logged detected:', hrs);
                 continue;
