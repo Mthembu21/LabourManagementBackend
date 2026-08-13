@@ -2451,6 +2451,12 @@ function classifyForDashboard(entry) {
   if (entry.is_leave || ['Leave', 'Sick'].includes(entry.category)) {
     return 'not_available';
   }
+  // Site Work has no job number to book against (logged through the idle flow)
+  // but is real, value-adding work performed off-site — checked before the
+  // hour_category/is_idle checks below so it isn't swept into the idle bucket.
+  if (entry.category === 'Site Work') {
+    return 'productive';
+  }
   if (entry.category === 'Training') {
     return 'training';
   }
@@ -2464,7 +2470,7 @@ function classifyForDashboard(entry) {
   if (!entry.is_idle && entry.job_id) {
     return 'productive';
   }
-  // Idle (new), Housekeeping (legacy), Site Work, Travelling, Other → idle bucket
+  // Idle (new), Housekeeping (legacy), Travelling, Other → idle bucket
   return 'idle';
 }
 
@@ -3128,7 +3134,11 @@ class KPICalculator {
               techDetail.productive_hours += hrs;
               techDetail.productive_entries.push({
                 date: dateStr,
-                job_id: entry.job_id || null,
+                // Site Work has no real job number (booked through the idle flow), so
+                // show its category/note instead of the IDLE_JOB_ID placeholder.
+                job_id: entry.category === 'Site Work'
+                  ? `Site Work${entry.category_detail ? `: ${entry.category_detail}` : ''}`
+                  : (entry.job_id || null),
                 hours: hrs,
               });
               dayProductive += hrs;

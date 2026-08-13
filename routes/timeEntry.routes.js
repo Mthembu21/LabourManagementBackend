@@ -2037,6 +2037,9 @@ router.post('/', requireAuth, async (req, res) => {
             if (category === 'Other' && !String(categoryDetail || '').trim()) {
                 return res.status(400).json({ error: 'category_detail is required when category is Other' });
             }
+            if (category === 'Site Work' && !String(categoryDetail || '').trim()) {
+                return res.status(400).json({ error: 'Please describe where and what site work was performed' });
+            }
             if (
                 category === 'Idle' &&
                 (TimeLog.IDLE_SUB_REASONS_REQUIRING_NOTE || []).includes(categoryDetail) &&
@@ -2414,6 +2417,11 @@ const reallocateDayNormalOvertime = async (technicianId, logDate) => {
             if (isLeave) {
                 // Leave entries don't count against utilization
                 hourCategory = null;
+            } else if (l.category === 'Site Work') {
+                // Site Work has no job number to book against (logged through the idle
+                // flow) but is real, value-adding work — it must not be marked as a
+                // utilization loss the way other idle time is.
+                hourCategory = holidayInfo.is_public_holiday ? null : 'productive';
             } else if (l.is_idle) {
                 if (holidayInfo.is_public_holiday) {
                     hourCategory = null; // Public holiday idle time doesn't count against utilization

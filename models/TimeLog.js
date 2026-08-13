@@ -8,24 +8,31 @@ const IDLE_CATEGORIES = [
     'Admin',
     'Waiting for Parts',
     'Training',
+    'Site Work',         // Work performed off-site — counts as productive, requires a note
     'Leave',
     'Sick',
     // Legacy — kept for backward-compat with existing records; hidden from new UI
     'Housekeeping',
-    'Site Work',
     'Travelling',
     'Other',
 ];
 
-// Categories shown to users when logging non-productive time
+// Categories shown to users when logging time not booked directly against a job stage
 const ENTRY_CATEGORIES = [
     'Idle',
     'Admin',
     'Waiting for Parts',
     'Training',
+    'Site Work',
     'Leave',
     'Sick',
 ];
+
+// Categories logged through the no-job-number (idle) flow that still count as
+// productive work — currently just Site Work, logged this way because it has no
+// job/stage number to book against, but the hours themselves are real, value-adding
+// work and must count toward utilization/productivity like any other job hours.
+const PRODUCTIVE_ENTRY_CATEGORIES = ['Site Work'];
 
 // Sub-reasons required when category = 'Idle'
 const IDLE_SUB_REASONS = [
@@ -231,6 +238,7 @@ timeLogSchema.index(
 
 timeLogSchema.statics.IDLE_CATEGORIES = IDLE_CATEGORIES;
 timeLogSchema.statics.ENTRY_CATEGORIES = ENTRY_CATEGORIES;
+timeLogSchema.statics.PRODUCTIVE_ENTRY_CATEGORIES = PRODUCTIVE_ENTRY_CATEGORIES;
 timeLogSchema.statics.IDLE_SUB_REASONS = IDLE_SUB_REASONS;
 timeLogSchema.statics.IDLE_SUB_REASONS_REQUIRING_NOTE = IDLE_SUB_REASONS_REQUIRING_NOTE;
 timeLogSchema.statics.HOUR_CATEGORIES = HOUR_CATEGORIES;
@@ -250,10 +258,16 @@ timeLogSchema.statics.determineTimeCategory = (entry) => {
         return TIME_CATEGORIES.NOT_AVAILABLE;
     }
 
-    // 2. Non-productive activities are checked BEFORE job_id so that a Training
+    // 2. Site Work has no job number to book against but is real, value-adding
+    //    work, so it counts as productive rather than non-productive.
+    if (entry.category === 'Site Work') {
+        return TIME_CATEGORIES.PRODUCTIVE;
+    }
+
+    // 3. Non-productive activities are checked BEFORE job_id so that a Training
     //    or Housekeeping entry booked against a work-order is still counted as
     //    non-productive, not productive.
-    if (['Training', 'Housekeeping', 'Admin', 'Waiting for Parts', 'Site Work'].includes(entry.category)) {
+    if (['Training', 'Housekeeping', 'Admin', 'Waiting for Parts'].includes(entry.category)) {
         return TIME_CATEGORIES.NON_PRODUCTIVE;
     }
 
