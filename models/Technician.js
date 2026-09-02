@@ -33,7 +33,24 @@ const technicianSchema = new mongoose.Schema({
     isActive: {
         type: Boolean,
         default: true
-    }
+    },
+    // Set when a supervisor permanently moves this technician in from another
+    // component. Distinct from TemporaryAssignment: this changes supervisor_key
+    // itself, so future utilization attributes to the new home workshop.
+    previous_supervisor_key: {
+        type: String,
+        enum: ['component', 'rebuild', 'pdis', 'kathu'],
+        default: null
+    },
+    transferred_at: Date,
+    transferred_by: String,
+    transfer_history: [{
+        from_supervisor_key: String,
+        to_supervisor_key: String,
+        reason: String,
+        transferred_at: Date,
+        transferred_by: String
+    }]
 }, {
     timestamps: true
 });

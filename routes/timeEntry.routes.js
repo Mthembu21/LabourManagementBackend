@@ -2059,9 +2059,10 @@ router.post('/', requireAuth, async (req, res) => {
             log_date: { $gte: start, $lt: end }
         });
 
-        // Leave/sick entries bypass both the absence-day block and the productive-hours cap.
-        // They record attendance, not productive work, so the normal 7.5-hour limit does not apply.
-        const isSickOrLeaveEntry = isLeave || (isIdle && (category === 'Leave' || category === 'Sick'));
+        // Leave/Sick/Team Building entries bypass both the absence-day block and the
+        // productive-hours cap. They record attendance, not productive work, so the
+        // normal 7.5-hour limit does not apply.
+        const isSickOrLeaveEntry = isLeave || (isIdle && ['Leave', 'Sick', 'Team Building'].includes(category));
         if (!isSickOrLeaveEntry) {
             const isAbsenceDay = await AttendanceRecord.isAbsenceDay(req.tenant.supervisor_key, technicianId, logDate);
             if (isAbsenceDay) {
@@ -2131,6 +2132,21 @@ router.post('/', requireAuth, async (req, res) => {
             }
 
             if (!jobForCheck) return res.status(400).json({ error: 'Job not found' });
+
+            // A supervisor can put a hold on one technician's ability to book hours on
+            // this specific job (e.g. site access revoked, waiting on a sign-off) without
+            // pausing the job for anyone else assigned to it. Enforced here, not just
+            // hidden client-side, so a stale/cached form can't slip a booking through.
+            const blockingAssignment = (jobForCheck.technicians || []).find(
+                (t) => t.technician_id && t.technician_id.toString() === String(technicianId)
+            );
+            if (blockingAssignment?.booking_blocked) {
+                return res.status(403).json({
+                    error: `You are blocked from booking hours on this job${blockingAssignment.block_reason ? `: ${blockingAssignment.block_reason}` : ''}`,
+                    booking_blocked: true,
+                    block_reason: blockingAssignment.block_reason || ''
+                });
+            }
 
             const effectiveSupervisorKey = jobForCheck.supervisor_key || req.tenant.supervisor_key;
 

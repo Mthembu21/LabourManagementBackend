@@ -11,6 +11,7 @@ const IDLE_CATEGORIES = [
     'Site Work',         // Work performed off-site — counts as productive, requires a note
     'Leave',
     'Sick',
+    'Team Building',
     // Legacy — kept for backward-compat with existing records; hidden from new UI
     'Housekeeping',
     'Travelling',
@@ -26,6 +27,7 @@ const ENTRY_CATEGORIES = [
     'Site Work',
     'Leave',
     'Sick',
+    'Team Building',
 ];
 
 // Categories logged through the no-job-number (idle) flow that still count as
@@ -252,9 +254,9 @@ timeLogSchema.statics.normalizeLogDate = (dateObj) => {
 
 // Determine time category based on entry data (strict classification)
 timeLogSchema.statics.determineTimeCategory = (entry) => {
-    // 1. Not Available wins over everything: Leave and Sick keep the technician
-    //    out of all productive/non-productive calculations.
-    if (entry.is_leave || ['Leave', 'Sick'].includes(entry.category)) {
+    // 1. Not Available wins over everything: Leave, Sick, and Team Building keep
+    //    the technician out of all productive/non-productive calculations.
+    if (entry.is_leave || ['Leave', 'Sick', 'Team Building'].includes(entry.category)) {
         return TIME_CATEGORIES.NOT_AVAILABLE;
     }
 

@@ -258,6 +258,69 @@ router.put('/temporary-assignment/:id/complete', requireSupervisor, async (req, 
     }
 });
 
+// ✅ Permanent move: technician's home component changes to the current supervisor's.
+// Unlike a temporary assignment (a loan), this is a full transfer of ownership -
+// going forward, this technician's utilization belongs to the new component, and
+// any other supervisor who wants to use them again must go through global assign.
+router.put('/:id/transfer', requireSupervisor, async (req, res) => {
+    try {
+        const { reason } = req.body;
+
+        if (!reason || reason.trim() === '') {
+            return res.status(400).json({ error: 'reason is required to move a technician' });
+        }
+
+        const technician = await Technician.findById(req.params.id);
+        if (!technician) {
+            return res.status(404).json({ error: 'Technician not found' });
+        }
+
+        if (technician.supervisor_key === req.tenant.supervisor_key) {
+            return res.status(400).json({ error: 'Technician already belongs to this component' });
+        }
+
+        const previousKey = technician.supervisor_key;
+        const movedBy = req.session.user.email || req.session.user.name || null;
+        const movedAt = new Date();
+
+        // Legacy technician docs predate the employeeNumber/employee_id required
+        // fields and never got backfilled, so a full-document save() would fail
+        // validation on fields unrelated to this move. Backfill them here rather
+        // than skip validation.
+        if (!technician.employeeNumber) technician.employeeNumber = technician.employee_id;
+        if (!technician.employee_id) technician.employee_id = technician.employeeNumber;
+
+        technician.supervisor_key = req.tenant.supervisor_key;
+        technician.previous_supervisor_key = previousKey;
+        technician.transferred_at = movedAt;
+        technician.transferred_by = movedBy;
+        technician.transfer_history.push({
+            from_supervisor_key: previousKey,
+            to_supervisor_key: req.tenant.supervisor_key,
+            reason: reason.trim(),
+            transferred_at: movedAt,
+            transferred_by: movedBy
+        });
+
+        await technician.save();
+
+        // A permanent move supersedes any outstanding "borrow" - once the technician
+        // belongs here, the old temporary-loan records for them no longer apply.
+        await TemporaryAssignment.updateMany(
+            { technician_id: technician._id, status: 'active' },
+            { $set: { status: 'completed' } }
+        );
+
+        res.json({
+            message: 'Technician moved successfully',
+            technician
+        });
+    } catch (error) {
+        console.error('Transfer technician error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Update technician
 router.put('/:id', requireSupervisor, async (req, res) => {
     try {

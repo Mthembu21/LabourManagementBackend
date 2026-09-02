@@ -126,6 +126,8 @@ router.get('/:supervisorKey/technician/:technicianId/alerts', requireAuth, async
                 recommendation: 'Investigate root causes of downtime and address them'
             });
         }
+        
+
 
         // Check for excessive overtime
         const overtimeLogs = await OvertimeLog.find({

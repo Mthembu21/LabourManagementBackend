@@ -2448,7 +2448,10 @@ function _mondayStart(date) {
 // Utilization numerator AND the Non-Productive numerator without double-counting
 // the other non-productive categories.
 function classifyForDashboard(entry) {
-  if (entry.is_leave || ['Leave', 'Sick'].includes(entry.category)) {
+  // Team Building is treated the same as Leave/Sick: the technician had no real
+  // opportunity to be productive that time, so it comes out of available hours
+  // rather than counting as idle/non-productive capacity loss.
+  if (entry.is_leave || ['Leave', 'Sick', 'Team Building'].includes(entry.category)) {
     return 'not_available';
   }
   // Site Work has no job number to book against (logged through the idle flow)
@@ -3248,8 +3251,14 @@ class KPICalculator {
           .filter(e => e.category === 'Sick' || e.category === 'sick')
           .map(e => e.date)
       );
+      const teamBuildingDates = new Set(
+        techDetail.not_available_entries
+          .filter(e => e.category === 'Team Building' || e.category === 'team building')
+          .map(e => e.date)
+      );
       techDetail.leave_days = leaveDates.size;
       techDetail.sick_days  = sickDates.size;
+      techDetail.team_building_days = teamBuildingDates.size;
     }
 
     // Re-derive ALL team totals by summing the per-technician breakdown.
@@ -3264,6 +3273,7 @@ class KPICalculator {
     totalTraining           = 0;
     let totalLeaveDays = 0;
     let totalSickDays  = 0;
+    let totalTeamBuildingDays = 0;
     let totalNotAvailableHours = 0;
 
     for (const td of techDetailsMap.values()) {
@@ -3276,6 +3286,7 @@ class KPICalculator {
       totalTraining            += td.training_hours;
       totalLeaveDays           += td.leave_days || 0;
       totalSickDays            += td.sick_days  || 0;
+      totalTeamBuildingDays    += td.team_building_days || 0;
       totalNotAvailableHours   += td.not_available_hours || 0;
     }
 
@@ -3369,6 +3380,7 @@ class KPICalculator {
         not_available_hours: totalScheduled - totalEffectiveAvailable,
         leave_days: totalLeaveDays,
         sick_days: totalSickDays,
+        team_building_days: totalTeamBuildingDays,
       },
     };
 
@@ -3410,6 +3422,7 @@ class KPICalculator {
       jobs_at_risk: jobsAtRiskCount,
       leave_days: totalLeaveDays,
       sick_days: totalSickDays,
+      team_building_days: totalTeamBuildingDays,
       training_hours: _round(totalTraining),
     };
   }

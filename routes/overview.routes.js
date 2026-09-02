@@ -82,12 +82,12 @@ router.get('/workshop', requireAuth, requireManager, async (req, res) => {
             // Categorize hours properly for utilization calculation
             const productiveHours = logs.reduce((sum, l) => {
                 if (l.is_idle) return sum;
-                if (l.category === 'Training' || l.category === 'Leave') return sum;
+                if (['Training', 'Leave', 'Sick', 'Team Building'].includes(l.category)) return sum;
                 return sum + Number(l.hours_logged || 0);
             }, 0);
 
             const idleHours = logs.reduce((sum, l) =>
-                l.is_idle && l.category !== 'Training' && l.category !== 'Leave'
+                l.is_idle && !['Training', 'Leave', 'Sick', 'Team Building'].includes(l.category)
                     ? sum + Number(l.hours_logged || 0)
                     : sum, 0);
 

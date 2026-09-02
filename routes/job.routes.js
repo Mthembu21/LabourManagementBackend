@@ -828,6 +828,160 @@ router.put('/by-job/:jobNumber/confirm', requireAuth, async (req, res) => {
     }
 });
 
+// Technician-only "remove from view" - hides (or restores) a job on that
+// technician's own dashboard. Does not touch the assignment, hours, or status,
+// so the supervisor and any other assigned technician see the job unchanged.
+router.put('/by-job/:jobNumber/hide-for-technician', requireAuth, async (req, res) => {
+    try {
+        const technicianId = req.body?.technician_id || req.body?.technicianId || req.session?.user?.id;
+        const hidden = req.body?.hidden !== false; // default true (hide); pass hidden:false to restore
+        if (!technicianId) return res.status(400).json({ error: 'technician_id is required' });
+
+        let job = await Job.findOne({
+            ...tenantQuery(req.tenant.supervisor_key),
+            job_number: req.params.jobNumber
+        });
+
+        // Some legacy clients/data may pass a Mongo _id instead of job_number.
+        if (!job && mongoose.Types.ObjectId.isValid(String(req.params.jobNumber))) {
+            job = await Job.findOne({
+                ...tenantQuery(req.tenant.supervisor_key),
+                _id: req.params.jobNumber
+            });
+        }
+
+        // Fallback for legacy jobs created before tenant isolation (no supervisor_key set)
+        if (!job && req.tenant?.supervisor_key && req.tenant.supervisor_key !== 'component') {
+            job = await Job.findOne({
+                job_number: req.params.jobNumber,
+                $or: [
+                    { supervisor_key: { $exists: false } },
+                    { supervisor_key: null }
+                ]
+            });
+        }
+
+        // Fallback for temporarily assigned (global) technicians: the job lives in a
+        // different workshop so tenantQuery misses it. Search cross-workshop but only
+        // where this technician is actually assigned - no privilege escalation.
+        if (!job) {
+            job = await Job.findOne({
+                job_number: req.params.jobNumber,
+                'technicians.technician_id': String(technicianId)
+            });
+            if (!job && mongoose.Types.ObjectId.isValid(String(req.params.jobNumber))) {
+                job = await Job.findOne({
+                    _id: req.params.jobNumber,
+                    'technicians.technician_id': String(technicianId)
+                });
+            }
+        }
+
+        if (!job) return res.status(404).json({ error: 'Job not found' });
+
+        const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(technicianId));
+        if (!tech) return res.status(404).json({ error: 'Technician is not assigned to this job' });
+
+        tech.hidden_by_technician = hidden;
+        tech.hidden_at = hidden ? new Date() : null;
+
+        await job.save();
+
+        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        res.json(enriched[0]);
+    } catch (error) {
+        console.error('Hide-for-technician failed', {
+            jobParam: req.params.jobNumber,
+            tenant: req.tenant?.supervisor_key,
+            technicianId: req.body?.technician_id || req.session?.user?.id,
+            errorName: error?.name,
+            errorMessage: error?.message
+        });
+        res.status(500).json({ error: error.message, name: error?.name || 'Error' });
+    }
+});
+
+// Supervisor-only: block (or unblock) a specific technician from logging any
+// further hours on this job, with a required reason when blocking. This is a
+// hold on one technician's booking ability, not a job-wide pause - the job
+// stays active for everyone else assigned to it.
+router.put('/by-job/:jobNumber/block-technician', requireSupervisor, async (req, res) => {
+    try {
+        const technicianId = req.body?.technician_id || req.body?.technicianId;
+        const blocked = req.body?.blocked !== false; // default true (block); pass blocked:false to lift
+        const reason = String(req.body?.reason || '').trim();
+
+        if (!technicianId) return res.status(400).json({ error: 'technician_id is required' });
+        if (blocked && !reason) return res.status(400).json({ error: 'A reason is required to block a technician from booking' });
+
+        let job = await Job.findOne({
+            ...tenantQuery(req.tenant.supervisor_key),
+            job_number: req.params.jobNumber
+        });
+
+        if (!job && mongoose.Types.ObjectId.isValid(String(req.params.jobNumber))) {
+            job = await Job.findOne({
+                ...tenantQuery(req.tenant.supervisor_key),
+                _id: req.params.jobNumber
+            });
+        }
+
+        if (!job && req.tenant?.supervisor_key && req.tenant.supervisor_key !== 'component') {
+            job = await Job.findOne({
+                job_number: req.params.jobNumber,
+                $or: [
+                    { supervisor_key: { $exists: false } },
+                    { supervisor_key: null }
+                ]
+            });
+        }
+
+        if (!job) return res.status(404).json({ error: 'Job not found' });
+
+        const tech = (job.technicians || []).find((t) => t.technician_id && t.technician_id.toString() === String(technicianId));
+        if (!tech) return res.status(404).json({ error: 'Technician is not assigned to this job' });
+
+        tech.booking_blocked = blocked;
+        tech.block_reason = blocked ? reason : '';
+        tech.blocked_at = blocked ? new Date() : null;
+        tech.blocked_by = blocked ? (req.session.user?.name || req.session.user?.email || '') : '';
+
+        const auditEntry = {
+            actor_email: req.session.user?.email || '',
+            actor_role: req.session.user?.role || 'supervisor',
+            at: new Date(),
+            type: blocked ? 'technician_booking_blocked' : 'technician_booking_unblocked',
+            details: {
+                technician_id: String(technicianId),
+                job_number: String(job.job_number),
+                reason: blocked ? reason : undefined
+            }
+        };
+        if (Array.isArray(job.audit_history)) {
+            job.audit_history.push(auditEntry);
+        } else if (typeof job.audit_history === 'string') {
+            const line = JSON.stringify(auditEntry);
+            job.audit_history = job.audit_history ? `${job.audit_history}\n${line}` : line;
+        } else {
+            job.audit_history = [auditEntry];
+        }
+
+        await job.save();
+
+        const enriched = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        res.json(enriched[0]);
+    } catch (error) {
+        console.error('Block-technician failed', {
+            jobParam: req.params.jobNumber,
+            tenant: req.tenant?.supervisor_key,
+            technicianId: req.body?.technician_id,
+            errorName: error?.name,
+            errorMessage: error?.message
+        });
+        res.status(500).json({ error: error.message, name: error?.name || 'Error' });
+    }
+});
+
 // Assign/add an additional technician to an existing job (by Job ID)
 router.put('/by-job/:jobNumber/assign-technician', requireSupervisor, async (req, res) => {
     try {
@@ -867,7 +1021,7 @@ router.put('/by-job/:jobNumber/assign-technician', requireSupervisor, async (req
 // Classify an entry into one of five buckets without trusting the stored
 // time_category field (which defaults to 'productive' for legacy records).
 function classifyJobEntry(entry) {
-    if (entry.is_leave || ['Leave', 'Sick'].includes(entry.category)) return 'not_available';
+    if (entry.is_leave || ['Leave', 'Sick', 'Team Building'].includes(entry.category)) return 'not_available';
     if (entry.category === 'Training') return 'training';
     if (['Admin', 'Waiting for Parts'].includes(entry.category)) return 'non_productive';
     if (entry.hour_category === 'utilization_loss') return entry.is_idle ? 'idle' : 'non_productive';

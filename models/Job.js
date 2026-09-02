@@ -18,6 +18,37 @@ const technicianAssignmentSchema = new mongoose.Schema({
     consumed_hours: {
         type: Number,
         default: 0
+    },
+    // Technician-only "remove from view" preference. Purely cosmetic - hides the
+    // job from that technician's own dashboard without touching the assignment,
+    // hours, or status. Supervisors and other assigned technicians are unaffected.
+    hidden_by_technician: {
+        type: Boolean,
+        default: false
+    },
+    hidden_at: {
+        type: Date,
+        default: null
+    },
+    // Supervisor-imposed hold: blocks this technician from logging any further
+    // hours against this job (e.g. site access revoked, waiting on a safety
+    // sign-off) until a supervisor lifts it. Enforced server-side at entry
+    // creation, not just hidden in the UI.
+    booking_blocked: {
+        type: Boolean,
+        default: false
+    },
+    block_reason: {
+        type: String,
+        default: ''
+    },
+    blocked_at: {
+        type: Date,
+        default: null
+    },
+    blocked_by: {
+        type: String,
+        default: ''
     }
 }, { _id: false });
 
