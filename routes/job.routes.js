@@ -223,7 +223,11 @@ router.put('/by-job/:jobNumber/reopen', requireAuth, async (req, res) => {
         const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: req.params.jobNumber });
         if (!job) return res.status(404).json({ error: 'Job not found' });
 
-        if (job.status !== 'completed') {
+        // Check the derived status, not the raw stored field: status is only persisted on
+        // specific writes (approve/edit/delete/manual complete), so a job whose hours
+        // already add up to "done" can be stuck showing an un-completed raw status. Without
+        // this, "Recover" is unreachable for exactly the jobs this endpoint exists to fix.
+        if (computeDerivedStatus(job.toObject()) !== 'completed') {
             return res.status(400).json({ error: 'Job is not completed' });
         }
 
@@ -1195,31 +1199,61 @@ async function aggregateCompletedJobsReport(jobs, supervisorKey) {
 // Get completed jobs report
 router.get('/completed-report', requireAuth, async (req, res) => {
     try {
-        const filter = {
-            ...tenantQuery(req.tenant.supervisor_key),
-            status: 'completed'
-        };
-
+        let fromDate = null;
+        let toDate = null;
         if (req.query.fromDate) {
-            const from = new Date(req.query.fromDate);
-            if (Number.isNaN(from.getTime())) {
+            fromDate = new Date(req.query.fromDate);
+            if (Number.isNaN(fromDate.getTime())) {
                 return res.status(400).json({ error: 'Invalid fromDate' });
             }
-            filter.actual_completion_date = { ...filter.actual_completion_date, $gte: from };
         }
         if (req.query.toDate) {
-            const to = new Date(req.query.toDate);
-            if (Number.isNaN(to.getTime())) {
+            toDate = new Date(req.query.toDate);
+            if (Number.isNaN(toDate.getTime())) {
                 return res.status(400).json({ error: 'Invalid toDate' });
             }
-            to.setHours(23, 59, 59, 999);
-            filter.actual_completion_date = { ...filter.actual_completion_date, $lte: to };
+            toDate.setHours(23, 59, 59, 999);
         }
 
+        // Cast a wide net rather than trusting the raw, persisted `status` field alone:
+        // status is only recomputed and saved on specific writes (approve/edit/delete/manual
+        // complete), so a job whose hours already add up to "done" can sit with a stale raw
+        // status if one of those writes silently failed or predates a fix. Every candidate
+        // here is re-derived below via the same computeDerivedStatus the rest of the app
+        // uses, so this only widens what's considered — it doesn't relax what counts as
+        // actually completed.
+        const candidates = await Job.find({
+            ...tenantQuery(req.tenant.supervisor_key),
+            $or: [
+                { status: 'completed' },
+                { manually_completed: true },
+                { $expr: { $and: [
+                    { $gt: ['$allocated_hours', 0] },
+                    { $gte: ['$consumed_hours', '$allocated_hours'] }
+                ] } }
+            ]
+        }).sort({ actual_completion_date: -1, updatedAt: -1 }).limit(1000);
+
+        const enriched = await enrichJobsWithTimeLogProgress(candidates, req.tenant.supervisor_key);
+        let completedJobs = enriched.filter((j) => j.status === 'completed');
+
+        if (fromDate) {
+            completedJobs = completedJobs.filter((j) => !j.actual_completion_date || new Date(j.actual_completion_date) >= fromDate);
+        }
+        if (toDate) {
+            completedJobs = completedJobs.filter((j) => !j.actual_completion_date || new Date(j.actual_completion_date) <= toDate);
+        }
+
+        completedJobs.sort((a, b) => {
+            const aDate = new Date(a.actual_completion_date || a.updatedAt || 0).getTime();
+            const bDate = new Date(b.actual_completion_date || b.updatedAt || 0).getTime();
+            return bDate - aDate;
+        });
+
         const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
-        const jobs = await Job.find(filter).sort({ actual_completion_date: -1, updatedAt: -1 }).limit(limit);
-        const enriched = await enrichJobsWithTimeLogProgress(jobs, req.tenant.supervisor_key);
-        const report = await aggregateCompletedJobsReport(enriched, req.tenant.supervisor_key);
+        completedJobs = completedJobs.slice(0, limit);
+
+        const report = await aggregateCompletedJobsReport(completedJobs, req.tenant.supervisor_key);
         res.json(report);
     } catch (error) {
         res.status(500).json({ error: error.message });

@@ -1977,6 +1977,23 @@ router.post('/', requireAuth, async (req, res) => {
                 if (!isIdle && jobForCheck) {
                     const deltaApproved = needsApproval ? 0 : deltaHours;
                     jobForCheck.consumed_hours = Number(jobForCheck.consumed_hours || 0) + deltaApproved;
+
+                    const allocated = Number(jobForCheck.allocated_hours || 0);
+                    const consumed = Number(jobForCheck.consumed_hours || 0);
+                    jobForCheck.remaining_hours = Math.max(0, allocated - consumed);
+                    jobForCheck.overrun_hours = Math.max(0, consumed - allocated);
+                    jobForCheck.progress_percentage = allocated > 0 ? Math.min(100, (consumed / allocated) * 100) : 0;
+
+                    const wasCompleted = jobForCheck.status === 'completed';
+                    jobForCheck.status = computeJobStatus(jobForCheck);
+                    if (jobForCheck.status === 'completed' && !wasCompleted) {
+                        jobForCheck.actual_completion_date = new Date();
+                        jobForCheck.total_hours_utilized = consumed;
+                    } else if (jobForCheck.status !== 'completed' && wasCompleted) {
+                        jobForCheck.actual_completion_date = null;
+                        jobForCheck.total_hours_utilized = null;
+                    }
+
                     await jobForCheck.save();
                 }
 
@@ -2242,7 +2259,24 @@ router.post('/', requireAuth, async (req, res) => {
         if (!isIdle && jobForCheck) {
             const deltaApproved = needsApproval ? 0 : deltaHours;
             jobForCheck.consumed_hours = Number(jobForCheck.consumed_hours || 0) + deltaApproved;
-            await jobForCheck.save();   // Simplified - expand with full progress logic if needed
+
+            const allocated = Number(jobForCheck.allocated_hours || 0);
+            const consumed = Number(jobForCheck.consumed_hours || 0);
+            jobForCheck.remaining_hours = Math.max(0, allocated - consumed);
+            jobForCheck.overrun_hours = Math.max(0, consumed - allocated);
+            jobForCheck.progress_percentage = allocated > 0 ? Math.min(100, (consumed / allocated) * 100) : 0;
+
+            const wasCompleted = jobForCheck.status === 'completed';
+            jobForCheck.status = computeJobStatus(jobForCheck);
+            if (jobForCheck.status === 'completed' && !wasCompleted) {
+                jobForCheck.actual_completion_date = new Date();
+                jobForCheck.total_hours_utilized = consumed;
+            } else if (jobForCheck.status !== 'completed' && wasCompleted) {
+                jobForCheck.actual_completion_date = null;
+                jobForCheck.total_hours_utilized = null;
+            }
+
+            await jobForCheck.save();
         }
 
         res.status(201).json(entry);
