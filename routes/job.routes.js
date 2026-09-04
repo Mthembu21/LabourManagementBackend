@@ -223,11 +223,15 @@ router.put('/by-job/:jobNumber/reopen', requireAuth, async (req, res) => {
         const job = await Job.findOne({ ...tenantQuery(req.tenant.supervisor_key), job_number: req.params.jobNumber });
         if (!job) return res.status(404).json({ error: 'Job not found' });
 
-        // Check the derived status, not the raw stored field: status is only persisted on
-        // specific writes (approve/edit/delete/manual complete), so a job whose hours
-        // already add up to "done" can be stuck showing an un-completed raw status. Without
-        // this, "Recover" is unreachable for exactly the jobs this endpoint exists to fix.
-        if (computeDerivedStatus(job.toObject()) !== 'completed') {
+        // Check the same pending-inclusive derived status the completed-report/active-list
+        // split uses, not the raw stored field: status is only persisted on specific writes
+        // (approve/edit/delete/manual complete), and "done" itself is judged from progress
+        // that counts submitted-but-not-yet-approved hours. A plain computeDerivedStatus on
+        // the unenriched job document misses that and would reject a job that's genuinely
+        // sitting in the Completed list. Without this, "Recover" is unreachable for exactly
+        // the jobs this endpoint exists to fix.
+        const [derivedJob] = await enrichJobsWithTimeLogProgress([job], req.tenant.supervisor_key);
+        if (derivedJob?.status !== 'completed') {
             return res.status(400).json({ error: 'Job is not completed' });
         }
 
@@ -1215,24 +1219,19 @@ router.get('/completed-report', requireAuth, async (req, res) => {
             toDate.setHours(23, 59, 59, 999);
         }
 
-        // Cast a wide net rather than trusting the raw, persisted `status` field alone:
+        // Don't pre-filter on the raw, persisted `status` field (or any raw hours field):
         // status is only recomputed and saved on specific writes (approve/edit/delete/manual
         // complete), so a job whose hours already add up to "done" can sit with a stale raw
-        // status if one of those writes silently failed or predates a fix. Every candidate
-        // here is re-derived below via the same computeDerivedStatus the rest of the app
-        // uses, so this only widens what's considered — it doesn't relax what counts as
-        // actually completed.
+        // status. Worse, "done" itself is judged from *pending-inclusive* live progress
+        // (enrichJobsWithTimeLogProgress counts a technician's submitted-but-not-yet-approved
+        // hours toward progress, so a job vanishes from the active list the moment hours are
+        // logged, before a supervisor approves them) — a case no raw-field heuristic can
+        // reliably pre-select. Enriching every tenant job and filtering on the same derived
+        // status the active/completed split already uses is the only way to guarantee a job
+        // that disappeared from Active always turns up here instead of nowhere.
         const candidates = await Job.find({
-            ...tenantQuery(req.tenant.supervisor_key),
-            $or: [
-                { status: 'completed' },
-                { manually_completed: true },
-                { $expr: { $and: [
-                    { $gt: ['$allocated_hours', 0] },
-                    { $gte: ['$consumed_hours', '$allocated_hours'] }
-                ] } }
-            ]
-        }).sort({ actual_completion_date: -1, updatedAt: -1 }).limit(1000);
+            ...tenantQuery(req.tenant.supervisor_key)
+        }).sort({ updatedAt: -1 }).limit(2000);
 
         const enriched = await enrichJobsWithTimeLogProgress(candidates, req.tenant.supervisor_key);
         let completedJobs = enriched.filter((j) => j.status === 'completed');
