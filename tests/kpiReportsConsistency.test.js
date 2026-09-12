@@ -81,7 +81,7 @@ describe('KPI reports consistency - centralized engine', () => {
         assert.ok(d.kpis);
       });
 
-      // Build independent expected KPI baseline ONLY from DAILY raw components.
+  
       // (This prevents self-referential validation drift.)
       let totalProductive = 0;
       let totalNonProductive = 0;

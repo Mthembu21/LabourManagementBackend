@@ -264,6 +264,7 @@ router.get('/:supervisorKey/supervisor/alerts', requireAuth, async (req, res) =>
                 }
             }
         }
+        
 
         // Filter by severity
         let filteredAlerts = alerts;
@@ -289,3 +290,6 @@ router.get('/:supervisorKey/supervisor/alerts', requireAuth, async (req, res) =>
 });
 
 module.exports = router;
+
+
+

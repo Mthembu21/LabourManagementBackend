@@ -189,10 +189,22 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId/complete', requireAuth, async
         job.progress_percentage = Math.max(taskBasedProgress, job.progress_percentage || 0);
         job.remaining_hours = Math.max(0, remainingHours);
         
-        // Only complete job when every assigned technician on every subtask has reached 100%.
+        // Only complete job when every assigned technician on every subtask has reached 100%
+        // AND the job's overall allocated hours have actually been consumed.
         // isLastRemainingTask was removed: it returned true when totalRemainingTasks <= 1,
         // which fired prematurely while one task was still pending.
-        if (job.status !== 'completed' && isJobFullyCompleteByAssignments(job)) {
+        //
+        // The hours check matters because subtasks are frequently allocated only part of
+        // the job's total allocated_hours (see getDefaultSubtasks/normalizeSubtasksInput -
+        // new stages start at 0h and a supervisor typically only allocates some of them).
+        // Without it, a technician finishing 100% of a small subtask allocation could
+        // auto-complete a job that still has a large chunk of never-allocated, unconsumed
+        // hours left - marking it manually_completed (a sticky override) and hiding it from
+        // the active list while it genuinely still has remaining hours. That exact scenario
+        // is why the /reopen endpoint's default reason is "Job mistakenly marked as
+        // completed - has remaining hours".
+        const hasNoRemainingAllocatedHours = allocated <= 0 || remainingHours <= 1e-9;
+        if (job.status !== 'completed' && hasNoRemainingAllocatedHours && isJobFullyCompleteByAssignments(job)) {
             job.status = 'completed';
             // Same override as a supervisor's manual "Mark Complete": every assigned
             // technician finishing their subtasks should stick even if logged hours
@@ -1260,11 +1272,24 @@ router.get('/completed-report', requireAuth, async (req, res) => {
 });
 
 // Get all jobs
+//
+// This is the single source of truth the dashboard's Active list, KPI counts,
+// and everything else on the Jobs tab derive from. A job's returned "status"
+// is computed live from its hours/progress (see enrichJobsWithTimeLogProgress /
+// computeDerivedStatus), NOT filtered here - so sorting by createdAt and
+// capping at a small limit silently drops the OLDEST jobs regardless of
+// whether they're still active. A tenant that has ever created more jobs than
+// the cap permanently loses visibility into every job older than that cutoff,
+// including ones still at_risk/in_progress with real remaining hours - they
+// never reach the client to be filtered, searched, or shown anywhere, active
+// or completed. Raised well above realistic per-tenant job counts (one tenant
+// was already at 297 and climbing when the previous 200 cap was found to be
+// silently excluding 97 of its jobs) while still bounding worst-case query size.
 router.get('/', requireAuth, async (req, res) => {
     try {
         const jobs = await Job.find({
             ...tenantQuery(req.tenant.supervisor_key)
-        }).sort({ createdAt: -1 }).limit(200);
+        }).sort({ createdAt: -1 }).limit(5000);
         const enriched = await enrichJobsWithTimeLogProgress(jobs, req.tenant.supervisor_key);
         res.json(enriched);
     } catch (error) {
@@ -1298,7 +1323,7 @@ router.get('/technician/:technicianId', requireAuth, async (req, res) => {
                     supervisor_key: { $ne: req.tenant.supervisor_key }
                 }
             ]
-        }).sort({ createdAt: -1 }).limit(200);
+        }).sort({ createdAt: -1 }).limit(5000); // see cap note on GET /
 
         // Enrich using all relevant supervisor keys so cross-workshop time logs are included
         const allSupervisorKeys = [...new Set([
@@ -1863,5 +1888,12 @@ router.delete('/:id', requireSupervisor, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+// Exposed so other route modules (e.g. the manager's cross-workshop overview)
+// can reuse the exact same status/progress derivation instead of duplicating
+// it - an Express Router is just a function, so attaching properties to it
+// doesn't interfere with app.use('/api/jobs', jobRoutes).
+router.enrichJobsWithTimeLogProgress = enrichJobsWithTimeLogProgress;
+router.computeDerivedStatus = computeDerivedStatus;
 
 module.exports = router;

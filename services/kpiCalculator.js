@@ -3075,23 +3075,31 @@ class KPICalculator {
         // Use d directly (local midnight from eachDayOfInterval) — do NOT call _midday()
         // here because _midday normalises to UTC midnight, which shifts the date in UTC+
         // timezones and produces a different key than the one in tlMap.
-        if (this._isWeekend(d)) continue;
-
         const dateStr = _toYMD(d);
         const key = `${tech}_${dateStr}`;
         const dayEntries = tlMap.get(key) || [];
+        const weekend = this._isWeekend(d);
         const holiday = isPublicHoliday(d);
 
-        // A public holiday nobody logged hours against is a day the technician wasn't
-        // expected to work — exclude it from the scheduled/available denominator so it
-        // doesn't drag down utilization/productivity like an ordinary no-show would. If
-        // they DID work it (shutdown/overtime), fall through and credit it normally.
-        if (holiday && dayEntries.length === 0) continue;
+        // A weekend or public holiday nobody logged hours against is a day the
+        // technician wasn't expected to work — exclude it from the scheduled/available
+        // denominator so it doesn't drag down utilization/productivity like an ordinary
+        // no-show would. If they DID work it (weekend/holiday overtime), fall through
+        // and credit it normally instead of discarding it.
+        //
+        // Weekends used to be skipped outright here regardless of dayEntries, before
+        // this check even ran — so real Saturday/Sunday hours never reached the
+        // productive/non-productive totals or hasData, even though those same hours
+        // were still summed into the separate, unguarded overtime_hours total further
+        // down. That produced a genuinely contradictory dashboard: "No activity
+        // recorded" next to a nonzero Overtime Hours card, whenever anyone worked a
+        // weekend shift.
+        if ((weekend || holiday) && dayEntries.length === 0) continue;
 
         const { available_hours, available_productive_hours } = getAvailability(d);
         const dayData = dailyMap.get(dateStr);
 
-        if (!holiday) {
+        if (!weekend && !holiday) {
           totalScheduled += available_hours;
           techDetail.scheduled_hours += available_hours;
           if (dayData) dayData.scheduledHours += available_hours;
@@ -3195,17 +3203,17 @@ class KPICalculator {
         }
 
         // Effective available = scheduled minus leave/sick logged directly in TimeLog.
-        // On a worked public holiday there was no scheduled capacity to begin with, so
-        // it contributes 0 here too — the hours still count above in the numerator
-        // (productive/training/etc.), just not against a denominator that assumes a
-        // mandated work day.
-        const effectiveAvailable = holiday ? 0 : Math.max(0, available_hours - notAvailableHrs);
+        // On a worked weekend or public holiday there was no scheduled capacity to
+        // begin with, so it contributes 0 here too — the hours still count above in
+        // the numerator (productive/training/etc.), just not against a denominator
+        // that assumes a mandated work day.
+        const effectiveAvailable = (weekend || holiday) ? 0 : Math.max(0, available_hours - notAvailableHrs);
         totalEffectiveAvailable += effectiveAvailable;
         techDetail.available_hours += effectiveAvailable;
 
         // Productive capacity is binary: any leave/sick entry on this day → 0.
         // Idle, Admin, WFP, and missing entries do NOT reduce productive capacity.
-        const techDayAvailProductive = holiday ? 0 : (notAvailableHrs > 0 ? 0 : available_productive_hours);
+        const techDayAvailProductive = (weekend || holiday) ? 0 : (notAvailableHrs > 0 ? 0 : available_productive_hours);
         totalAvailableProductive += techDayAvailProductive;
         techDetail.available_productive_hours += techDayAvailProductive;
 

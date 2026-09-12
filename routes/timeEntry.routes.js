@@ -2041,6 +2041,21 @@ router.post('/', requireAuth, async (req, res) => {
         if (!entryDate || Number.isNaN(entryDate.getTime())) return res.status(400).json({ error: 'log_date is required' });
         if (hoursLogged <= 0) return res.status(400).json({ error: 'hours_logged must be > 0' });
 
+        // Validated up-front, before the time log or job is touched, so a bad report
+        // fails the whole request instead of leaving hours booked with the report
+        // silently dropped (the failure mode when this check used to run after the
+        // entry/job were already saved).
+        if (report && report.has_bottleneck && report.bottleneck_category === 'technical_complexity') {
+            const desc = String(report.bottleneck_description || '').trim();
+            const timeLost = Number(report.bottleneck_time_lost_hours);
+            if (!desc) {
+                return res.status(400).json({ error: 'Technical Complexity requires a description of the issue' });
+            }
+            if (Number.isNaN(timeLost) || timeLost <= 0) {
+                return res.status(400).json({ error: 'Technical Complexity requires time lost (hours) greater than 0' });
+            }
+        }
+
         if (isIdle) {
             if (jobId !== IDLE_JOB_ID) {
                 return res.status(400).json({ error: `Idle logs must use job_id '${IDLE_JOB_ID}'` });
@@ -2277,6 +2292,41 @@ router.post('/', requireAuth, async (req, res) => {
             }
 
             await jobForCheck.save();
+        }
+
+        // Persist the technician's work-completed / bottleneck report against this job
+        // and roll its hours into the job's totals. This handling used to exist but was
+        // left commented out during a refactor: the frontend still captured and sent
+        // `report`, but this endpoint silently discarded it, so no JobReport was ever
+        // created and job.bottleneck_count / technical_complexity_hours never moved -
+        // the supervisor had no way to see the reasons technicians gave for lost time.
+        if (!isIdle && report && (String(report.work_completed || '').trim() || report.has_bottleneck)) {
+            const jobReport = new JobReport({
+                ...report,
+                supervisor_key: effectiveKey,
+                job_id: jobId,
+                job_number: jobId,
+                technician_id: technicianId,
+                daily_time_entry_id: entry._id
+            });
+            await jobReport.save();
+
+            if (report.has_bottleneck && jobForCheck) {
+                jobForCheck.bottleneck_count = (jobForCheck.bottleneck_count || 0) + 1;
+
+                if (report.bottleneck_category === 'technical_complexity') {
+                    const inc = Math.max(0, Number(report.bottleneck_time_lost_hours || 0));
+                    if (inc > 0) {
+                        jobForCheck.technical_complexity_hours = Number(jobForCheck.technical_complexity_hours || 0) + inc;
+                    }
+                }
+
+                if (jobForCheck.status !== 'overrun' && jobForCheck.status !== 'completed' && jobForCheck.bottleneck_count >= 2) {
+                    jobForCheck.status = 'at_risk';
+                }
+
+                await jobForCheck.save();
+            }
         }
 
         res.status(201).json(entry);

@@ -3,8 +3,20 @@ const router = express.Router();
 
 const Job = require('../models/Job');
 const TimeLog = require('../models/TimeLog');
-const DayEntry = require('../models/DayEntry');
+const JobReport = require('../models/JobReport');
+const AttendanceRecord = require('../models/AttendanceRecord');
+const KPICalculator = require('../services/kpiCalculator');
+const jobRoutes = require('./job.routes');
 const { requireAuth, tenantQuery } = require('../middleware/auth');
+
+const WORKSHOP_KEYS = ['component', 'pdis', 'rebuild', 'kathu'];
+
+const keyToLabel = {
+    component: 'Components',
+    pdis: 'PDI',
+    rebuild: 'Rebuild',
+    kathu: 'Kathu'
+};
 
 const getMonthRange = (monthStr) => {
     const m = String(monthStr || '').trim();
@@ -30,16 +42,13 @@ const requireManager = (req, res, next) => {
     next();
 };
 
-const keyToLabel = {
-    component: 'Components',
-    pdis: 'PDI',
-    rebuild: 'Rebuild',
-    kathu: 'Kathu'
-};
-
+// Legacy month-only summary (kept for backward compatibility with any existing
+// caller). This previously threw on every request - AttendanceRecord was used
+// below but never required in this file, so the absence-day lookup always hit
+// a ReferenceError and the whole endpoint 500'd regardless of the month.
 router.get('/workshop', requireAuth, requireManager, async (req, res) => {
     try {
-        const keys = ['component', 'pdis', 'rebuild', 'kathu'];
+        const keys = WORKSHOP_KEYS;
 
         const month = req.query?.month ? String(req.query.month) : '';
         const range = getMonthRange(month);
@@ -51,7 +60,7 @@ router.get('/workshop', requireAuth, requireManager, async (req, res) => {
         let totalNonProductive = 0;
 
         for (const k of keys) {
-            const jobs = await Job.find(tenantQuery(k)).limit(500);
+            const jobs = await Job.find(tenantQuery(k)).limit(5000);
 
             const logQuery = { ...tenantQuery(k) };
             if (range) {
@@ -60,7 +69,6 @@ router.get('/workshop', requireAuth, requireManager, async (req, res) => {
             const logs = await TimeLog.find(logQuery).limit(20000);
 
             // Build set of absence day technician-date combinations (approved AttendanceRecord only)
-            const absenceDays = new Set();
             const absenceQuery = {
                 supervisor_key: k,
                 status: 'approved',
@@ -70,11 +78,10 @@ router.get('/workshop', requireAuth, requireManager, async (req, res) => {
                 absenceQuery.date = { $gte: range.start, $lt: range.end };
             }
 
-            const absenceRecords = await AttendanceRecord.find(absenceQuery).select({ technician_id: 1, date: 1 });
-            absenceRecords.forEach(r => {
-                absenceDays.add(`${r.technician_id}_${new Date(r.date).toDateString()}`);
-            });
-
+            // Referenced for parity with the per-technician KPI engine's absence
+            // handling, though this legacy summary doesn't currently subtract
+            // absence hours from its own totals below.
+            await AttendanceRecord.find(absenceQuery).select({ technician_id: 1, date: 1 });
 
             const jobsOpened = jobs.length;
             const hoursConsumed = logs.reduce((sum, l) => sum + Number(l.hours_logged || 0), 0);
@@ -131,6 +138,82 @@ router.get('/workshop', requireAuth, requireManager, async (req, res) => {
             non_productive_hours: totalNonProductive,
             by_workshop: byWorkshop
         });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Full KPI parity with the per-workshop supervisor dashboard (productivity,
+// utilization, efficiency, availability, non-productive %, overtime, training,
+// completed/at-risk job counts), for an arbitrary date range - so the same
+// daily/weekly/last_week/monthly views the supervisor dashboard offers work
+// here too. Reuses KPICalculator.calculateDashboardKPIs (the exact engine
+// OperationalMetricsFetcher calls per-workshop) so numbers always match what
+// each workshop's own supervisor sees, instead of a second, divergent
+// calculation. `combined` passes all four keys in one call - the calculator
+// already supports an array of supervisor_keys for a foreman's multi-workshop
+// view, so an "all workshops" total falls out of the same code path.
+router.get('/kpis', requireAuth, requireManager, async (req, res) => {
+    try {
+        const { start_date, end_date } = req.query;
+        if (!start_date || !end_date) {
+            return res.status(400).json({ error: 'start_date and end_date are required' });
+        }
+
+        const [combined, ...perWorkshop] = await Promise.all([
+            KPICalculator.calculateDashboardKPIs(WORKSHOP_KEYS, start_date, end_date),
+            ...WORKSHOP_KEYS.map((k) => KPICalculator.calculateDashboardKPIs(k, start_date, end_date))
+        ]);
+
+        const by_workshop = {};
+        WORKSHOP_KEYS.forEach((k, i) => {
+            by_workshop[k] = { key: k, label: keyToLabel[k], ...perWorkshop[i] };
+        });
+
+        res.json({ start_date, end_date, combined, by_workshop });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Every job in every workshop, enriched with the exact same live-computed
+// status/progress the workshop's own supervisor dashboard shows (see
+// enrichJobsWithTimeLogProgress in job.routes.js) - lets the manager browse
+// or search any job regardless of which workshop owns it.
+router.get('/jobs', requireAuth, requireManager, async (req, res) => {
+    try {
+        const byWorkshop = {};
+        for (const k of WORKSHOP_KEYS) {
+            const jobs = await Job.find(tenantQuery(k)).sort({ createdAt: -1 }).limit(5000);
+            byWorkshop[k] = await jobRoutes.enrichJobsWithTimeLogProgress(jobs, k);
+        }
+        res.json(byWorkshop);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Full detail for one job in one specific workshop - status, progress,
+// technicians/subtasks, hours, plus every daily report (work-completed notes
+// and bottleneck/issue history) filed against it, so a manager searching by
+// job number can see exactly what's happening on that job without needing
+// that workshop's own supervisor login.
+router.get('/job/:workshop/:jobNumber', requireAuth, requireManager, async (req, res) => {
+    try {
+        const { workshop, jobNumber } = req.params;
+        if (!WORKSHOP_KEYS.includes(workshop)) {
+            return res.status(400).json({ error: 'Unknown workshop' });
+        }
+
+        const job = await Job.findOne({ ...tenantQuery(workshop), job_number: jobNumber });
+        if (!job) return res.status(404).json({ error: 'Job not found in this workshop' });
+
+        const [enriched] = await jobRoutes.enrichJobsWithTimeLogProgress([job], workshop);
+        const reports = await JobReport.find({ ...tenantQuery(workshop), job_id: jobNumber })
+            .sort({ date: -1 })
+            .lean();
+
+        res.json({ job: enriched, reports });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
