@@ -20,10 +20,12 @@ router.get('/', requireAuth, async (req, res) => {
 // Create technician
 router.post('/', requireSupervisor, async (req, res) => {
     try {
-        // ✅ Prevent duplicate technicians by employee number (scoped to this workshop only —
-        // employee IDs are not globally unique across supervisors)
+        // ✅ Prevent duplicate technicians by employee number. employee_id/employeeNumber
+        // are globally unique (Technician.js) - a technician is one global entity that
+        // moves between workshops via /transfer, not a per-workshop record - so this check
+        // must NOT be tenant-scoped, or a cross-workshop collision would fall through to a
+        // raw Mongo E11000 duplicate-key error from technician.save() below instead.
         const existing = await Technician.findOne({
-            ...tenantQuery(req.tenant.supervisor_key),
             employee_id: req.body.employee_id || req.body.employeeNumber
         });
 
@@ -43,6 +45,14 @@ router.post('/', requireSupervisor, async (req, res) => {
         await technician.save();
         res.status(201).json(technician);
     } catch (error) {
+        // Duplicate key errors can still slip through under a race condition between the
+        // check above and save() - surface them the same friendly way instead of a raw
+        // Mongo E11000 message.
+        if (error.code === 11000) {
+            return res.status(400).json({
+                error: "Technician already exists. Please search and assign instead."
+            });
+        }
         res.status(400).json({ error: error.message });
     }
 });
