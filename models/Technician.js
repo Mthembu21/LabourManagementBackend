@@ -39,8 +39,11 @@ const technicianSchema = new mongoose.Schema({
     // itself, so future utilization attributes to the new home workshop.
     previous_supervisor_key: {
         type: String,
-        enum: ['component', 'rebuild', 'pdis', 'kathu'],
-        default: null
+        enum: ['component', 'rebuild', 'pdis', 'kathu']
+        // No default: Mongoose's enum validator rejects `null` unless it's
+        // itself listed as a valid enum value, so `default: null` made every
+        // technician creation fail schema validation. Leaving it unset means
+        // this field is simply absent until a real transfer sets it.
     },
     transferred_at: Date,
     transferred_by: String,
