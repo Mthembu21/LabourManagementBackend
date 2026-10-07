@@ -1812,6 +1812,47 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId', requireSupervisor, async (r
                 next_allocated_hours: a.allocated_hours
             }));
 
+        // A technician's stored progress (progress_by_technician) is only recomputed on
+        // time-log approval/edit, so once it hit 100% against an old, smaller allocation
+        // its sticky `completed` flag kept the stage hidden from that technician's
+        // booking list even after a supervisor raised their hours — and they could never
+        // book again to trigger a recompute. When hours are increased, recompute progress
+        // against the new allocation from approved hours, reopening the stage if it's no
+        // longer fully consumed. Decreases are left alone so a technician's deliberate
+        // "complete stage" isn't undone by an unrelated trim of their hours.
+        const increasedTechIds = hourChanges
+            .filter((c) => c.next_allocated_hours > c.previous_allocated_hours)
+            .map((c) => c.technician_id);
+        if (increasedTechIds.length) {
+            const approvedLogs = await TimeLog.find({
+                job_id: String(job.job_number),
+                subtask_id: String(st._id),
+                technician_id: { $in: increasedTechIds },
+                is_idle: false,
+                approved_hours: { $gt: 0 }
+            }).select({ technician_id: 1, approved_hours: 1 });
+
+            st.progress_by_technician = Array.isArray(st.progress_by_technician) ? st.progress_by_technician : [];
+            for (const techId of increasedTechIds) {
+                const progress = st.progress_by_technician.find((p) => String(p?.technician_id) === techId);
+                if (!progress) continue;
+                const nextAlloc = nextAssigned.find((a) => a.technician_id === techId)?.allocated_hours || 0;
+                const approved = approvedLogs
+                    .filter((l) => String(l.technician_id) === techId)
+                    .reduce((sum, l) => sum + Number(l.approved_hours || 0), 0);
+                const pct = nextAlloc > 0 ? Math.max(0, Math.min(100, (approved / nextAlloc) * 100)) : 0;
+                progress.progress_percentage = pct;
+                if (pct < 100 - 1e-9) {
+                    progress.completed = false;
+                    progress.completed_at = null;
+                }
+                progress.updated_at = new Date();
+            }
+
+            // Same rule as a job-level hours change: adding work releases a manual completion.
+            if (job.manually_completed) job.manually_completed = false;
+        }
+
         if (hourChanges.length) {
             const reason = typeof req.body.hours_change_reason === 'string' ? req.body.hours_change_reason.trim() : '';
             job.audit_history = Array.isArray(job.audit_history) ? job.audit_history : [];
