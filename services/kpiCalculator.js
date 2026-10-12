@@ -3402,6 +3402,19 @@ class KPICalculator {
     const totalOvertimeHours = timeLogs
       .filter(e => e.approval_status !== 'declined')
       .reduce((sum, e) => sum + Number(e.overtime_hours || 0), 0);
+
+    // Same rule, split per technician, so per-technician reports (e.g. the weekly
+    // executive report) show overtime that adds up to the Overtime Hours total.
+    // details.technicians holds these same objects, so this lands in the response.
+    const overtimeByTech = new Map();
+    for (const e of timeLogs) {
+      if (e.approval_status === 'declined') continue;
+      const techKey = String(e.technician_id?._id || e.technician_id || '');
+      overtimeByTech.set(techKey, (overtimeByTech.get(techKey) || 0) + Number(e.overtime_hours || 0));
+    }
+    for (const td of techDetailsMap.values()) {
+      td.overtime_hours = _round(overtimeByTech.get(String(td.technician_id)) || 0);
+    }
     const totalTechniciansCount = await Technician.countDocuments(
       supervisorKeys.includes('component')
         ? { $or: [{ supervisor_key: supervisorKeyMatch }, { supervisor_key: { $exists: false } }], status: 'active' }

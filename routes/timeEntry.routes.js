@@ -1838,12 +1838,42 @@ router.put('/:id', requireSupervisor, async (req, res) => {
 });
 
 // ==================== CREATE TIME LOG (FIXED) ====================
+// Every new entry must say what was actually done, so supervisors and reports always
+// have a description next to the hours. Job hours need the daily report's "work
+// completed"; non-job time needs its note (Idle keeps its sub-reason in category_detail
+// and the explanation in category_note; Training/Site Work/Other use category_detail).
+// Absences (leave, sick, team building) need no note. Only enforced on creation, so
+// older entries without notes can still be edited.
+const NOTE_EXEMPT_CATEGORIES = ['Leave', 'Sick', 'Team Building'];
+const missingWorkNoteError = ({ isIdle, isLeave, category, categoryDetail, categoryNote, report }) => {
+    if (isIdle) {
+        if (isLeave || NOTE_EXEMPT_CATEGORIES.includes(category)) return null;
+        const note = category === 'Idle' ? categoryNote : (categoryDetail || categoryNote);
+        return String(note || '').trim() ? null : 'Please add a note describing what you did during this time';
+    }
+    return String(report?.work_completed || '').trim()
+        ? null
+        : 'Please describe the work you completed before submitting your hours';
+};
+
 router.post('/', requireAuth, async (req, res) => {
     try {
         const { timeLog, report, timeEntry, batch } = req.body;
         
         // Handle batch creation for leave entries
         if (batch && Array.isArray(batch)) {
+            for (const item of batch) {
+                const p = item?.timeLog || {};
+                const noteError = missingWorkNoteError({
+                    isIdle: typeof p.is_idle !== 'undefined' ? !!p.is_idle : (p.job_id === IDLE_JOB_ID),
+                    isLeave: !!p.is_leave,
+                    category: p.category ?? null,
+                    categoryDetail: p.category_detail,
+                    categoryNote: p.category_note,
+                    report: item?.report
+                });
+                if (noteError) return res.status(400).json({ error: noteError });
+            }
             const results = [];
             for (const item of batch) {
                 const { timeLog: itemTimeLog, report: itemReport } = item;
@@ -2040,6 +2070,9 @@ router.post('/', requireAuth, async (req, res) => {
         if (!jobId) return res.status(400).json({ error: 'job_id is required' });
         if (!entryDate || Number.isNaN(entryDate.getTime())) return res.status(400).json({ error: 'log_date is required' });
         if (hoursLogged <= 0) return res.status(400).json({ error: 'hours_logged must be > 0' });
+
+        const noteError = missingWorkNoteError({ isIdle, isLeave, category, categoryDetail, categoryNote, report });
+        if (noteError) return res.status(400).json({ error: noteError });
 
         // Validated up-front, before the time log or job is touched, so a bad report
         // fails the whole request instead of leaving hours booked with the report
@@ -2345,10 +2378,11 @@ router.post('/', requireAuth, async (req, res) => {
 // Get all time logs (supports filtering)
 router.get('/', requireAuth, async (req, res) => {
     try {
-        const { technician_id, category, start_date, end_date, is_idle } = req.query;
+        const { technician_id, category, start_date, end_date, is_idle, job_id } = req.query;
 
         const query = { ...tenantQuery(req.tenant.supervisor_key) };
         if (technician_id) query.technician_id = technician_id;
+        if (typeof job_id === 'string' && job_id.trim()) query.job_id = job_id.trim();
         if (typeof is_idle !== 'undefined') query.is_idle = String(is_idle) === 'true';
         if (category) query.category = category;
 
