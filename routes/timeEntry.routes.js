@@ -2373,7 +2373,12 @@ router.get('/', requireAuth, async (req, res) => {
             delete query.supervisor_key;
         }
 
-        const entries = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(500);
+        // Default stays 500 for the dashboard's rolling list; date-ranged callers (exports,
+        // weekly report) pass a higher limit so a full period isn't silently truncated.
+        const requestedLimit = parseInt(req.query.limit, 10);
+        const limit = Number.isFinite(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, 5000) : 500;
+
+        const entries = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(limit);
         res.json(entries);
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -2399,6 +2404,59 @@ router.get('/technician/:technicianId', requireAuth, async (req, res) => {
 
         const entries = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(500);
         res.json(entries);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Working days (Mon-Fri, not a public holiday) in the last N days, up to yesterday,
+// on which this technician booked no time at all — not even leave/idle/training.
+// Today is excluded since the day isn't over yet. Days before the technician was
+// added to the system, and days covered by a leave/sick attendance record that
+// wasn't declined, aren't counted as missed.
+router.get('/technician/:technicianId/missed-days', requireAuth, async (req, res) => {
+    try {
+        const deny = requireSelfOrSupervisor(req, res, req.params.technicianId);
+        if (deny) return;
+
+        const { format, subDays, startOfDay } = require('date-fns');
+        const lookbackDays = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 90);
+        const technicianId = req.params.technicianId;
+
+        const yesterday = startOfDay(subDays(new Date(), 1));
+        let windowStart = startOfDay(subDays(new Date(), lookbackDays));
+        const technician = await Technician.findById(technicianId).select({ createdAt: 1 }).lean();
+        if (technician?.createdAt && startOfDay(new Date(technician.createdAt)) > windowStart) {
+            windowStart = startOfDay(new Date(technician.createdAt));
+        }
+        if (windowStart > yesterday) {
+            return res.json({ missed_days: [], window_start: null, window_end: null });
+        }
+
+        const [logs, attendance] = await Promise.all([
+            TimeLog.find({ technician_id: technicianId, log_date: { $gte: subDays(windowStart, 1), $lte: new Date() } })
+                .select({ log_date: 1 }).lean(),
+            AttendanceRecord.find({ technician_id: technicianId, date: { $gte: subDays(windowStart, 1), $lte: new Date() }, status: { $ne: 'declined' } })
+                .select({ date: 1 }).lean()
+        ]);
+        const bookedDays = new Set(logs.map((l) => format(new Date(l.log_date), 'yyyy-MM-dd')));
+        const attendanceDays = new Set(attendance.map((a) => format(new Date(a.date), 'yyyy-MM-dd')));
+
+        const missedDays = [];
+        for (let d = new Date(windowStart); d <= yesterday; d.setDate(d.getDate() + 1)) {
+            const dow = d.getDay();
+            if (dow === 0 || dow === 6) continue;
+            if (getSouthAfricanHolidayInfo(d).is_public_holiday) continue;
+            const key = format(d, 'yyyy-MM-dd');
+            if (bookedDays.has(key) || attendanceDays.has(key)) continue;
+            missedDays.push({ date: key, day: format(d, 'EEEE') });
+        }
+
+        res.json({
+            missed_days: missedDays,
+            window_start: format(windowStart, 'yyyy-MM-dd'),
+            window_end: format(yesterday, 'yyyy-MM-dd')
+        });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
