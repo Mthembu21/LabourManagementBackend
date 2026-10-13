@@ -1494,14 +1494,14 @@ const getNormalLimitForDate = (dateObj) => {
 
 const normalizeDayOnly = (d) => normalizeHolidayDayOnly(d);
 
+// Rate paid on overtime hours: 1.5x Monday to Saturday, 2x on Sundays and public
+// holidays. (Weekdays used to return 1, so weekday overtime was paid at the normal rate.)
 const getOvertimeMultiplierForDate = (dateObj) => {
     const day = normalizeDayOnly(dateObj);
     const holiday = getSouthAfricanHolidayInfo(day);
     if (holiday.is_public_holiday) return 2;
-    const idx = day.getDay();
-    if (idx === 0) return 2; // Sunday
-    if (idx === 6) return 1.5; // Saturday
-    return 1;
+    if (day.getDay() === 0) return 2; // Sunday
+    return 1.5; // Monday - Saturday
 };
 
 // ====================== ROUTES ======================
@@ -2546,7 +2546,10 @@ const reallocateDayNormalOvertime = async (technicianId, logDate) => {
 
     const holidayInfo = getSouthAfricanHolidayInfo(day);
     const multiplier = getOvertimeMultiplierForDate(day);
-    const isAllOvertime = multiplier > 1 || holidayInfo.is_public_holiday || normalLimit === 0;
+    // Weekends and public holidays have no normal hours, so everything worked is overtime.
+    const isAllOvertime = holidayInfo.is_public_holiday || normalLimit === 0;
+    // Normal hours are paid at 1x, overtime hours at the day's overtime rate.
+    const payableFor = (normalHrs, otHrs) => normalHrs + otHrs * multiplier;
 
     // ✅ Validate inputs to prevent calculation errors
     if (!Array.isArray(logs)) {
@@ -2585,15 +2588,15 @@ const reallocateDayNormalOvertime = async (technicianId, logDate) => {
                 // available to this day's other (non-overtime-flagged) entries.
                 normal = 0;
                 ot = hrs;
-                payable = multiplier > 1 ? (hrs * multiplier) : hrs;
-                overtimeMultiplier = Math.max(1, multiplier);
+                payable = payableFor(normal, ot);
+                overtimeMultiplier = ot > 0 ? multiplier : 1;
             } else {
                 // Normal overtime calculation for non-leave entries
                 normal = isAllOvertime ? 0 : Math.max(0, Math.min(hrs, normalRemaining));
                 ot = Math.max(0, hrs - normal);
                 normalRemaining = Math.max(0, normalRemaining - normal);
-                payable = multiplier > 1 ? (hrs * multiplier) : hrs;
-                overtimeMultiplier = Math.max(1, multiplier);
+                payable = payableFor(normal, ot);
+                overtimeMultiplier = ot > 0 ? multiplier : 1;
             }
 
             const nextIsHoliday = Boolean(holidayInfo.is_public_holiday);
@@ -2734,5 +2737,8 @@ router.delete('/:id', requireAuth, async (req, res) => {
         res.status(400).json({ error: error.message });
     }
 });
+
+// Exposed for maintenance scripts (e.g. recomputing stored overtime pay after a rate change).
+router.reallocateDayNormalOvertime = reallocateDayNormalOvertime;
 
 module.exports = router;
