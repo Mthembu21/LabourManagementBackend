@@ -182,6 +182,14 @@ const jobSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+    // Supervisor "Make Active" on a completed job: keeps it active so it can be edited
+    // and worked on again, even when its hours are already used up (which would
+    // otherwise re-derive it as completed on the next read). Cleared whenever the job
+    // is marked completed again.
+    reopened_active: {
+        type: Boolean,
+        default: false
+    },
     subtasks: {
         type: [subtaskSchema],
         default: []

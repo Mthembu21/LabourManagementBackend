@@ -394,7 +394,8 @@ const computeJobStatus = (jobDoc) => {
     const derivedPct = Number(
         jobDoc.aggregated_progress_percentage ?? jobDoc.progress_percentage ?? 0
     );
-    if (derivedPct >= 100 - 1e-9) return 'completed';
+    // Reopened by a supervisor ("Make Active"): stays active until marked completed again.
+    if (derivedPct >= 100 - 1e-9 && !jobDoc.reopened_active) return 'completed';
 
     // Don't auto-complete based on consumed hours alone - let stage completion handle this
     // This prevents jobs from disappearing when hours are partially booked

@@ -207,6 +207,7 @@ router.post('/:supervisorKey/job/:jobId/status', requireAuth, async (req, res) =
         // technician's dashboard or the job detail view refetches). Cleared whenever the
         // supervisor sets a different status, or via reopen/hours-edit elsewhere.
         job.manually_completed = status === 'completed';
+        if (status === 'completed') job.reopened_active = false;
 
         // Add to audit history
         if (!job.audit_history) {
@@ -346,6 +347,7 @@ router.post('/:supervisorKey/bulk-status-update', requireAuth, async (req, res) 
                 const oldStatus = job.status;
                 job.status = status;
                 job.manually_completed = status === 'completed';
+                if (status === 'completed') job.reopened_active = false;
 
                 if (!job.audit_history) {
                     job.audit_history = [];

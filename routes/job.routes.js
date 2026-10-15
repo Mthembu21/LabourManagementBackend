@@ -210,6 +210,7 @@ router.put('/by-job/:jobNumber/subtasks/:subtaskId/complete', requireAuth, async
             // technician finishing their subtasks should stick even if logged hours
             // haven't caught up to allocated_hours by the time this saves.
             job.manually_completed = true;
+            job.reopened_active = false;
             job.progress_percentage = 100;
             job.remaining_hours = 0;
             job.actual_completion_date = new Date();
@@ -257,18 +258,23 @@ router.put('/by-job/:jobNumber/reopen', requireAuth, async (req, res) => {
             if (!isAssigned) return res.status(403).json({ error: 'Not assigned to this job' });
         }
 
-        // Check if job has remaining hours
+        // A technician can only reopen a job that still has hours left. A supervisor can
+        // reopen any completed job ("Make Active") to edit it and continue work, even with
+        // its hours used up — reopened_active keeps it active until it's completed again.
         const allocated = Number(job.allocated_hours || 0);
         const consumed = Number(job.consumed_hours || 0);
-        if (allocated <= consumed) {
+        if (!isSupervisor && allocated <= consumed) {
             return res.status(400).json({ error: 'No remaining hours to reopen job' });
         }
 
         // Reopen the job
         job.status = 'active';
         job.manually_completed = false;
-        job.progress_percentage = Math.max(0, ((consumed / allocated) * 100) - 5); // Slightly reduce progress
-        job.remaining_hours = allocated - consumed;
+        job.reopened_active = true;
+        job.progress_percentage = allocated > 0
+            ? Math.min(100, Math.max(0, ((consumed / allocated) * 100) - 5)) // Slightly reduce progress
+            : 0;
+        job.remaining_hours = Math.max(0, allocated - consumed);
         job.actual_completion_date = null;
         job.total_hours_utilized = null;
 
@@ -382,9 +388,12 @@ function computeDerivedStatus(jobObj) {
     const derivedPct = Number(
         jobObj.aggregated_progress_percentage ?? jobObj.progress_percentage ?? 0
     );
-    if (derivedPct >= 100 - 1e-9) return 'completed';
-
-    if (allocated > 0 && consumed >= allocated - 1e-9) return 'completed';
+    // A job a supervisor brought back with "Make Active" stays active even though its
+    // hours read as used up, until it's marked completed again.
+    if (!jobObj.reopened_active) {
+        if (derivedPct >= 100 - 1e-9) return 'completed';
+        if (allocated > 0 && consumed >= allocated - 1e-9) return 'completed';
+    }
 
     if (Number(jobObj.bottleneck_count || 0) >= 2) return 'at_risk';
 
@@ -1517,6 +1526,7 @@ router.put('/by-job/:jobNumber', requireSupervisor, async (req, res) => {
             // 'completed' here must survive the next read-time status recompute, and
             // choosing anything else must release a prior manual completion.
             job.manually_completed = body.status === 'completed';
+            if (body.status === 'completed') job.reopened_active = false;
         }
         if (Object.prototype.hasOwnProperty.call(body, 'start_date')) job.start_date = body.start_date ? new Date(body.start_date) : null;
         if (Object.prototype.hasOwnProperty.call(body, 'target_completion_date')) job.target_completion_date = body.target_completion_date ? new Date(body.target_completion_date) : null;
