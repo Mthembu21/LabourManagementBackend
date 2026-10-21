@@ -1096,8 +1096,10 @@ async function aggregateCompletedJobsReport(jobs, supervisorKey) {
 
     const technicianLookup = {};
     if (technicianIds.size) {
+        // Looked up by id across all workshops: technicians assigned cross-workshop belong
+        // to another supervisor's tenant, and a tenant filter here left their names blank.
+        // Only the names of technicians already on these jobs' logs/assignments are read.
         const technicians = await Technician.find({
-            ...tenantQuery(supervisorKey),
             _id: { $in: Array.from(technicianIds) }
         }).select({ _id: 1, name: 1 }).lean();
         technicians.forEach((tech) => {
@@ -1180,9 +1182,19 @@ async function aggregateCompletedJobsReport(jobs, supervisorKey) {
                 else if (bucket === 'not_available')  summary.not_available_hours  += hrs;
 
                 return {
+                    id: String(entry._id),
                     date: entry.log_date,
                     technician_id: techId || null,
                     technician_name: techName,
+                    subtask_title: entry.subtask_title || null,
+                    approval_status: entry.approval_status || null,
+                    // Hours that actually count: nothing for a declined entry, the approved
+                    // figure once approved, what was logged while still pending.
+                    effective_hours: entry.approval_status === 'declined'
+                        ? 0
+                        : (entry.approval_status === 'approved' && Number(entry.approved_hours) > 0
+                            ? Number(entry.approved_hours)
+                            : hrs),
                     classification: bucket,
                     category: entry.category || null,
                     sub_reason: entry.category_detail ? String(entry.category_detail).trim() || null : null,
@@ -1204,22 +1216,56 @@ async function aggregateCompletedJobsReport(jobs, supervisorKey) {
             first_log_date: firstLogDate,
             last_log_date: lastLogDate,
             completed_at: job.actual_completion_date || job.updatedAt || null,
+            progress_percentage: Number(job.aggregated_progress_percentage ?? job.progress_percentage ?? 0),
             technicians: job.technicians || [],
+            // Each technician's own allocated hours on this job, summed across their stages.
+            technician_allocations: Object.values((job.subtasks || []).reduce((acc, st) => {
+                for (const a of (st.assigned_technicians || [])) {
+                    const id = String(a?.technician_id || '');
+                    if (!id) continue;
+                    if (!acc[id]) acc[id] = { technician_id: id, technician_name: technicianLookup[id] || a.technician_name || null, allocated_hours: 0 };
+                    acc[id].allocated_hours += Number(a.allocated_hours || 0);
+                }
+                return acc;
+            }, {})),
             time_summary: summary,
             hours_by_technician: Object.values(hoursByTechnician),
             time_entries: timeEntries,
             job_reports: jobReports.map((report) => ({
                 date: report.date,
+                daily_time_entry_id: report.daily_time_entry_id ? String(report.daily_time_entry_id) : null,
                 technician_id: report.technician_id ? String(report.technician_id) : null,
                 technician_name: report.technician_id ? technicianLookup[String(report.technician_id)] || null : null,
                 work_completed: report.work_completed || null,
                 has_bottleneck: report.has_bottleneck || false,
+                bottleneck_category: report.bottleneck_category || null,
                 bottleneck_description: report.bottleneck_description || null,
+                bottleneck_time_lost_hours: Number(report.bottleneck_time_lost_hours || 0),
                 notes: report.notes || null,
             })),
         };
     });
 }
+
+// Same per-job report as the completed report, for jobs still in progress: every job
+// whose live derived status isn't 'completed' (the same split the dashboard's Active
+// list uses), most recently updated first.
+router.get('/active-report', requireAuth, async (req, res) => {
+    try {
+        const candidates = await Job.find({
+            ...tenantQuery(req.tenant.supervisor_key)
+        }).sort({ updatedAt: -1 }).limit(2000);
+
+        const enriched = await enrichJobsWithTimeLogProgress(candidates, req.tenant.supervisor_key);
+        const limit = Math.min(Math.max(Number(req.query.limit) || 500, 1), 1000);
+        const activeJobs = enriched.filter((j) => j.status !== 'completed').slice(0, limit);
+
+        const report = await aggregateCompletedJobsReport(activeJobs, req.tenant.supervisor_key);
+        res.json(report);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
 // Get completed jobs report
 router.get('/completed-report', requireAuth, async (req, res) => {
