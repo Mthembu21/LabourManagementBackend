@@ -1762,19 +1762,39 @@ router.put('/:id/decline', requireSupervisor, async (req, res) => {
 });
 
 // Edit time log (supervisor only — hours, category, subtask)
-router.put('/:id', requireSupervisor, async (req, res) => {
+// Edit a time entry. Supervisors can edit any entry in their workshop. Technicians can
+// edit their own entries (any workshop — cross-workshop entries are stored under the
+// job's workshop): the "what was done" note at any time, but the hours only while the
+// entry is still pending, so an approved or declined figure can't change behind the
+// supervisor's back.
+//
+// For job entries, `work_completed` is the technician's note of what was done. It lives
+// on the JobReport(s) filed with this entry (daily_time_entry_id) — the same records the
+// supervisor's job view, job report and activity log read — so editing it here updates
+// what supervisors see. Booking the same job/stage twice on one day merges the hours into
+// one entry but files a report each time, so the edited text is written to the earliest
+// report and cleared from the rest (their bottleneck details are kept).
+router.put('/:id', requireAuth, async (req, res) => {
     try {
-        const { timeLog } = req.body;
+        const { timeLog, work_completed: workCompleted } = req.body;
         if (!timeLog) return res.status(400).json({ error: 'timeLog body is required' });
 
-        const existing = await TimeLog.findOne({
-            ...tenantQuery(req.tenant.supervisor_key),
-            _id: req.params.id
-        });
+        const user = req.session.user;
+        const isSupervisor = user?.type === 'supervisor';
+        const existing = isSupervisor
+            ? await TimeLog.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id })
+            : await TimeLog.findOne({ _id: req.params.id, technician_id: user?.id });
         if (!existing) return res.status(404).json({ error: 'Time log not found' });
 
+        const prevHours = Number(existing.hours_logged || 0);
         const newHours = Number(timeLog.hours_logged);
-        if (Number.isFinite(newHours) && newHours > 0) {
+        const hoursChanging = Number.isFinite(newHours) && newHours > 0 && Math.abs(newHours - prevHours) > 1e-9;
+        if (hoursChanging && !isSupervisor && existing.approval_status !== 'pending') {
+            return res.status(400).json({
+                error: `This entry has already been ${existing.approval_status}, so its hours can't be changed. You can still update the notes.`
+            });
+        }
+        if (hoursChanging) {
             existing.hours_logged = newHours;
             // Keep approved_hours in sync: cap at new submitted hours
             if (existing.approval_status === 'approved') {
@@ -1797,20 +1817,59 @@ router.put('/:id', requireSupervisor, async (req, res) => {
             }
         }
 
-        if (typeof timeLog.subtask_id !== 'undefined') existing.subtask_id = timeLog.subtask_id || null;
+        const updatingWorkNote = !existing.is_idle && typeof workCompleted === 'string';
+        if (updatingWorkNote && !isSupervisor && !workCompleted.trim()) {
+            return res.status(400).json({ error: 'Please describe the work you completed' });
+        }
+
+        if (isSupervisor && typeof timeLog.subtask_id !== 'undefined') existing.subtask_id = timeLog.subtask_id || null;
 
         await existing.save();
 
-        // Recompute job consumed hours so remaining / progress stay accurate
-        if (!existing.is_idle && existing.job_id) {
+        if (updatingWorkNote) {
+            const linkedReports = await JobReport.find({ daily_time_entry_id: existing._id }).sort({ createdAt: 1 });
+            if (linkedReports.length) {
+                const [first, ...rest] = linkedReports;
+                first.work_completed = workCompleted.trim();
+                await first.save();
+                for (const r of rest) {
+                    if (r.work_completed) {
+                        r.work_completed = '';
+                        await r.save();
+                    }
+                }
+            } else if (workCompleted.trim()) {
+                await new JobReport({
+                    supervisor_key: existing.supervisor_key,
+                    job_id: existing.job_id,
+                    job_number: existing.job_id,
+                    technician_id: existing.technician_id,
+                    date: existing.log_date,
+                    work_completed: workCompleted.trim(),
+                    has_bottleneck: false,
+                    daily_time_entry_id: existing._id
+                }).save();
+            }
+        }
+
+        if (hoursChanging) {
+            // Normal/overtime split and payable hours depend on the day's total hours.
+            await reallocateDayNormalOvertime(existing.technician_id, existing.log_date)
+                .catch((e) => console.error('Overtime reallocation after edit (non-fatal):', e.message));
+        }
+
+        // Recompute job consumed hours so remaining / progress stay accurate. Uses the
+        // entry's own workshop, which for a technician's cross-workshop entry is the job's.
+        const jobTenantKey = existing.supervisor_key || req.tenant.supervisor_key;
+        if (hoursChanging && !existing.is_idle && existing.job_id) {
             try {
                 const job = await Job.findOne({
-                    ...tenantQuery(req.tenant.supervisor_key),
+                    ...tenantQuery(jobTenantKey),
                     job_number: existing.job_id
                 });
                 if (job) {
                     const approvedLogs = await TimeLog.find({
-                        ...tenantQuery(req.tenant.supervisor_key),
+                        ...tenantQuery(jobTenantKey),
                         is_idle: false,
                         job_id: existing.job_id,
                         approval_status: 'approved'
@@ -2437,8 +2496,23 @@ router.get('/technician/:technicianId', requireAuth, async (req, res) => {
             Object.assign(query, tenantQuery(req.tenant.supervisor_key));
         }
 
-        const entries = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(500);
-        res.json(entries);
+        const entries = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(500).lean();
+
+        // Attach each job entry's "what was done" note (from the report(s) filed with it)
+        // so the technician can see and edit it alongside the hours.
+        const jobEntryIds = entries.filter((e) => !e.is_idle).map((e) => e._id);
+        const reports = jobEntryIds.length
+            ? await JobReport.find({ daily_time_entry_id: { $in: jobEntryIds } })
+                .select({ daily_time_entry_id: 1, work_completed: 1, createdAt: 1 }).sort({ createdAt: 1 }).lean()
+            : [];
+        const notesByEntry = new Map();
+        for (const r of reports) {
+            const note = String(r.work_completed || '').trim();
+            if (!note) continue;
+            const key = String(r.daily_time_entry_id);
+            notesByEntry.set(key, notesByEntry.has(key) ? `${notesByEntry.get(key)}\n${note}` : note);
+        }
+        res.json(entries.map((e) => (e.is_idle ? e : { ...e, work_completed: notesByEntry.get(String(e._id)) || '' })));
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
