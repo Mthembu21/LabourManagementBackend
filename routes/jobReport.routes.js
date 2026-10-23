@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const JobReport = require('../models/JobReport');
+const Technician = require('../models/Technician');
 const { requireAuth, tenantQuery } = require('../middleware/auth');
 
 // Get all job reports
@@ -8,7 +9,13 @@ router.get('/', requireAuth, async (req, res) => {
     try {
         // ?job_id= returns every report for that one job (the job details view), instead
         // of only the workshop's latest 200, which dropped older notes on long jobs.
-        const query = tenantQuery(req.tenant.supervisor_key);
+        let query = tenantQuery(req.tenant.supervisor_key);
+        // Same as /time-entries?scope=own_technicians: also include reports filed by this
+        // workshop's own technicians on other workshops' jobs (stored under that workshop).
+        if (req.query.scope === 'own_technicians' && req.session.user?.type === 'supervisor') {
+            const ownTechIds = (await Technician.find(tenantQuery(req.tenant.supervisor_key)).select({ _id: 1 }).lean()).map((t) => t._id);
+            query = { $or: [tenantQuery(req.tenant.supervisor_key), { technician_id: { $in: ownTechIds } }] };
+        }
         const jobId = typeof req.query.job_id === 'string' ? req.query.job_id.trim() : '';
         if (jobId) query.job_id = jobId;
         // ?start_date=&end_date= (yyyy-MM-dd, inclusive) returns every report in that

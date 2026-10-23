@@ -2465,6 +2465,17 @@ router.get('/', requireAuth, async (req, res) => {
             // Technicians may have cross-workshop time logs — query by id only, no supervisor_key filter
             query.technician_id = req.session.user.id;
             delete query.supervisor_key;
+        } else if (req.query.scope === 'own_technicians') {
+            // Hours booked on another workshop's job are stored under that job's workshop,
+            // so a workshop-only query misses its own technicians' cross-workshop work
+            // (for PDIS about a third of their hours). This scope returns the workshop's
+            // entries plus every entry by its own technicians, wherever it's stored — for
+            // read-only per-technician views (activity log, technician report).
+            const tenantFilter = tenantQuery(req.tenant.supervisor_key);
+            const ownTechIds = (await Technician.find(tenantFilter).select({ _id: 1 }).lean()).map((t) => t._id);
+            delete query.supervisor_key;
+            delete query.$or;
+            query.$and = [{ $or: [tenantFilter, { technician_id: { $in: ownTechIds } }] }];
         }
 
         // Default stays 500 for the dashboard's rolling list; date-ranged callers (exports,
@@ -2473,6 +2484,22 @@ router.get('/', requireAuth, async (req, res) => {
         const limit = Number.isFinite(requestedLimit) && requestedLimit > 0 ? Math.min(requestedLimit, 5000) : 500;
 
         const entries = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(limit);
+
+        if (req.query.scope === 'own_technicians' && req.session.user?.type !== 'technician') {
+            // Cross-workshop entries point at jobs the dashboard doesn't have, so attach each
+            // job's description for the per-technician views to show what the job was.
+            const jobNumbers = [...new Set(entries.filter((e) => !e.is_idle && e.job_id).map((e) => String(e.job_id)))];
+            const jobs = jobNumbers.length
+                ? await Job.find({ job_number: { $in: jobNumbers } }).select({ job_number: 1, description: 1, supervisor_key: 1 }).lean()
+                : [];
+            const jobInfo = new Map(jobs.map((j) => [String(j.job_number), j]));
+            return res.json(entries.map((e) => {
+                const obj = e.toJSON();
+                const j = !obj.is_idle ? jobInfo.get(String(obj.job_id)) : null;
+                return j ? { ...obj, job_description: j.description || '', job_workshop: j.supervisor_key || '' } : obj;
+            }));
+        }
+
         res.json(entries);
     } catch (error) {
         res.status(500).json({ error: error.message });
