@@ -2463,8 +2463,9 @@ function classifyForDashboard(entry) {
   if (entry.category === 'Training') {
     return 'training';
   }
-  // Admin and Waiting for Parts are non-productive but not idle
-  if (['Admin', 'Waiting for Parts'].includes(entry.category)) {
+  // Admin, Waiting for Parts and the automatic Daily Allocation (meetings & breaks)
+  // are non-productive but not idle
+  if (['Admin', 'Waiting for Parts', 'Daily Allocation'].includes(entry.category)) {
     return 'non_productive';
   }
   if (entry.hour_category === 'utilization_loss') {

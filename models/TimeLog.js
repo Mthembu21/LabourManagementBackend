@@ -12,6 +12,9 @@ const IDLE_CATEGORIES = [
     'Leave',
     'Sick',
     'Team Building',
+    // System-only: the automatic 1h "meetings & breaks" allocation added to each day a
+    // technician books time (see DAILY_ALLOCATION). Never selectable by technicians.
+    'Daily Allocation',
     // Legacy — kept for backward-compat with existing records; hidden from new UI
     'Housekeeping',
     'Travelling',
@@ -35,6 +38,18 @@ const ENTRY_CATEGORIES = [
 // job/stage number to book against, but the hours themselves are real, value-adding
 // work and must count toward utilization/productivity like any other job hours.
 const PRODUCTIVE_ENTRY_CATEGORIES = ['Site Work'];
+
+// Automatic non-productive allocation: 1 hour of meetings & breaks for every day a
+// technician has at least one real (non-declined) entry, kept in sync by
+// syncDailyAllocation in routes/timeEntry.routes.js. Stored as an approved,
+// system_generated entry so it appears in non-productive hours and exports, while being
+// left out of overtime, booking limits, approvals and the technician's own view.
+const DAILY_ALLOCATION = {
+    category: 'Daily Allocation',
+    label: 'Daily Allocation – Meetings & Breaks',
+    detail: 'Meetings & Breaks',
+    hours: 1
+};
 
 // Sub-reasons required when category = 'Idle'
 const IDLE_SUB_REASONS = [
@@ -215,6 +230,13 @@ const timeLogSchema = new mongoose.Schema({
         required: true,
         default: 'productive',
         index: true
+    },
+    // Created automatically by the system (the daily meetings & breaks allocation),
+    // not booked by the technician.
+    system_generated: {
+        type: Boolean,
+        default: false,
+        index: true
     }
 }, {
     timestamps: true
@@ -245,6 +267,7 @@ timeLogSchema.statics.IDLE_SUB_REASONS = IDLE_SUB_REASONS;
 timeLogSchema.statics.IDLE_SUB_REASONS_REQUIRING_NOTE = IDLE_SUB_REASONS_REQUIRING_NOTE;
 timeLogSchema.statics.HOUR_CATEGORIES = HOUR_CATEGORIES;
 timeLogSchema.statics.TIME_CATEGORIES = TIME_CATEGORIES;
+timeLogSchema.statics.DAILY_ALLOCATION = DAILY_ALLOCATION;
 
 timeLogSchema.statics.normalizeLogDate = (dateObj) => {
     const d = new Date(dateObj);
@@ -269,7 +292,7 @@ timeLogSchema.statics.determineTimeCategory = (entry) => {
     // 3. Non-productive activities are checked BEFORE job_id so that a Training
     //    or Housekeeping entry booked against a work-order is still counted as
     //    non-productive, not productive.
-    if (['Training', 'Housekeeping', 'Admin', 'Waiting for Parts'].includes(entry.category)) {
+    if (['Training', 'Housekeeping', 'Admin', 'Waiting for Parts', DAILY_ALLOCATION.category].includes(entry.category)) {
         return TIME_CATEGORIES.NON_PRODUCTIVE;
     }
 

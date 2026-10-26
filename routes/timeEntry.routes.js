@@ -1785,6 +1785,9 @@ router.put('/:id', requireAuth, async (req, res) => {
             ? await TimeLog.findOne({ ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id })
             : await TimeLog.findOne({ _id: req.params.id, technician_id: user?.id });
         if (!existing) return res.status(404).json({ error: 'Time log not found' });
+        if (existing.system_generated) {
+            return res.status(400).json({ error: 'The daily allocation (meetings & breaks) is added automatically and can\'t be edited' });
+        }
 
         const prevHours = Number(existing.hours_logged || 0);
         const newHours = Number(timeLog.hours_logged);
@@ -1920,6 +1923,12 @@ router.post('/', requireAuth, async (req, res) => {
     try {
         const { timeLog, report, timeEntry, batch } = req.body;
         
+        // The daily allocation is only ever created by the system.
+        const requestedCategories = (Array.isArray(batch) ? batch.map((i) => i?.timeLog?.category) : [(timeLog || timeEntry || {}).category]);
+        if (requestedCategories.includes(TimeLog.DAILY_ALLOCATION.category)) {
+            return res.status(400).json({ error: `"${TimeLog.DAILY_ALLOCATION.category}" is added automatically and can't be booked` });
+        }
+
         // Handle batch creation for leave entries
         if (batch && Array.isArray(batch)) {
             for (const item of batch) {
@@ -1987,7 +1996,8 @@ router.post('/', requireAuth, async (req, res) => {
                 // count toward the daily cap correctly.
                 const existingDayLogs = await TimeLog.find({
                     technician_id: technicianId,
-                    log_date: { $gte: start, $lt: end }
+                    log_date: { $gte: start, $lt: end },
+                    system_generated: { $ne: true }
                 });
 
                 const totalForDay = existingDayLogs.reduce((sum, e) => sum + Number(e.hours_logged || 0), 0);
@@ -2181,7 +2191,8 @@ router.post('/', requireAuth, async (req, res) => {
         // count toward the daily cap and duplicate-merge works correctly.
         const existingDayLogs = await TimeLog.find({
             technician_id: technicianId,
-            log_date: { $gte: start, $lt: end }
+            log_date: { $gte: start, $lt: end },
+            system_generated: { $ne: true }
         });
 
         // Leave/Sick/Team Building entries bypass both the absence-day block and the
@@ -2465,6 +2476,8 @@ router.get('/', requireAuth, async (req, res) => {
             // Technicians may have cross-workshop time logs — query by id only, no supervisor_key filter
             query.technician_id = req.session.user.id;
             delete query.supervisor_key;
+            // The automatic daily allocation is silent on the technician's side.
+            query.system_generated = { $ne: true };
         } else if (req.query.scope === 'own_technicians') {
             // Hours booked on another workshop's job are stored under that job's workshop,
             // so a workshop-only query misses its own technicians' cross-workshop work
@@ -2521,6 +2534,9 @@ router.get('/technician/:technicianId', requireAuth, async (req, res) => {
         const query = { technician_id: req.params.technicianId };
         if (req.session.user?.type !== 'technician') {
             Object.assign(query, tenantQuery(req.tenant.supervisor_key));
+        } else {
+            // The automatic daily allocation is silent on the technician's side.
+            query.system_generated = { $ne: true };
         }
 
         const entries = await TimeLog.find(query).sort({ log_date: -1, createdAt: -1 }).limit(500).lean();
@@ -2635,12 +2651,87 @@ const requireSelfOrSupervisor = (req, res, technicianId) => {
     return res.status(403).json({ error: 'Not allowed' });
 };
 
-const reallocateDayNormalOvertime = async (technicianId, logDate) => {
+// Keeps the automatic 1h "Daily Allocation – Meetings & Breaks" entry in sync for one
+// technician-day: it exists exactly when the technician has at least one real entry
+// that counts (not declined / not approved at 0h) and isn't an absence (leave, sick,
+// team building) — on any day, weekends and public holidays included, as long as they
+// booked something. Removed again if those entries are deleted or declined. Stored under
+// the technician's own workshop so it shows in that workshop's non-productive figures.
+const DAILY_ALLOCATION_ABSENCES = ['Leave', 'Sick', 'Team Building'];
+const syncDailyAllocation = async (technicianId, logDate) => {
+    const allocation = TimeLog.DAILY_ALLOCATION;
     const day = TimeLog.normalizeLogDate(logDate);
     const { start, end } = getDayRange(day);
-    const logs = await TimeLog.find({
+    const dayLogs = await TimeLog.find({
         technician_id: technicianId,
         log_date: { $gte: start, $lt: end }
+    }).sort({ createdAt: 1, _id: 1 });
+
+    const existing = dayLogs.filter((l) => l.system_generated);
+    const workedEntry = dayLogs.find((l) =>
+        !l.system_generated &&
+        effectiveEntryHours(l) > 0 &&
+        !(l.is_leave || DAILY_ALLOCATION_ABSENCES.includes(l.category))
+    );
+
+    if (!workedEntry) {
+        for (const a of existing) await a.deleteOne();
+        return;
+    }
+    // Exactly one per day.
+    for (const extra of existing.slice(1)) await extra.deleteOne();
+    if (existing.length) return;
+
+    const tech = await Technician.findById(technicianId).select({ supervisor_key: 1 }).lean();
+    const holidayInfo = getSouthAfricanHolidayInfo(day);
+    try {
+        await TimeLog.create({
+            supervisor_key: tech?.supervisor_key || workedEntry.supervisor_key || 'component',
+            technician_id: technicianId,
+            job_id: IDLE_JOB_ID,
+            subtask_id: null,
+            hours_logged: allocation.hours,
+            // Same stored date as the technician's own entry for this day, so it lands on
+            // the same calendar day whatever timezone this code runs in (e.g. a backfill
+            // run from a machine on SA time against dates stored at UTC midnight).
+            log_date: workedEntry.log_date,
+            category: allocation.category,
+            category_detail: allocation.detail,
+            category_note: '',
+            is_idle: true,
+            is_leave: false,
+            time_category: TimeLog.TIME_CATEGORIES.NON_PRODUCTIVE,
+            hour_category: null,
+            normal_hours: allocation.hours,
+            overtime_hours: 0,
+            overtime_multiplier: 1,
+            payable_hours: allocation.hours,
+            is_public_holiday: Boolean(holidayInfo.is_public_holiday),
+            public_holiday_name: holidayInfo.public_holiday_name || null,
+            requested_overtime: false,
+            approval_status: 'approved',
+            approved_hours: allocation.hours,
+            approved_by: 'system',
+            approved_at: new Date(),
+            system_generated: true
+        });
+    } catch (e) {
+        // A concurrent request already created it (unique per technician/day/category).
+        if (e?.code !== 11000) throw e;
+    }
+};
+
+const reallocateDayNormalOvertime = async (technicianId, logDate) => {
+    await syncDailyAllocation(technicianId, logDate)
+        .catch((e) => console.error('Daily allocation sync failed (non-fatal):', e.message));
+
+    const day = TimeLog.normalizeLogDate(logDate);
+    const { start, end } = getDayRange(day);
+    // The daily allocation never takes part in the normal/overtime split.
+    const logs = await TimeLog.find({
+        technician_id: technicianId,
+        log_date: { $gte: start, $lt: end },
+        system_generated: { $ne: true }
     }).sort({ createdAt: 1, _id: 1 });
 
     const normalLimit = getNormalLimitForDate(day);
@@ -2779,6 +2870,9 @@ router.delete('/:id', requireAuth, async (req, res) => {
             : { ...tenantQuery(req.tenant.supervisor_key), _id: req.params.id };
         const existing = await TimeLog.findOne(deleteQuery);
         if (!existing) return res.status(404).json({ error: 'Time log not found' });
+        if (existing.system_generated) {
+            return res.status(400).json({ error: 'The daily allocation (meetings & breaks) is added automatically and is removed when the day has no other entries' });
+        }
         const deny = requireSelfOrSupervisor(req, res, existing.technician_id);
         if (deny) return;
 
@@ -2842,5 +2936,6 @@ router.delete('/:id', requireAuth, async (req, res) => {
 
 // Exposed for maintenance scripts (e.g. recomputing stored overtime pay after a rate change).
 router.reallocateDayNormalOvertime = reallocateDayNormalOvertime;
+router.syncDailyAllocation = syncDailyAllocation;
 
 module.exports = router;
